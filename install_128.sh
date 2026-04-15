@@ -136,8 +136,23 @@ pip install --no-deps "git+https://github.com/facebookresearch/pytorch3d.git@v0.
 # The submodules MUST be populated before running this script:
 #     git submodule update --init --recursive
 #
-# If these fail to build on torch 2.9.1 / CUDA 12.8, that is handled in
-# Phase 3 of the upgrade plan (submodule URLs / patches).
+# simple-knn needs a newer commit than the submodule pointer (the original
+# camenduru commit uses torch's deprecated .data API and is missing <float.h>,
+# both of which break on PyTorch 2.x / CUDA 12.x). Force-check out the known-
+# good commit before building. Safe no-op if already on that commit.
+SIMPLE_KNN_PIN="60f461ff977c577ab43e29c9e4f7a4480eecc87a"
+if [ -d submodules/simple-knn/.git ] || [ -f submodules/simple-knn/.git ]; then
+    (
+        cd submodules/simple-knn
+        git fetch origin "${SIMPLE_KNN_PIN}" 2>/dev/null || git fetch origin
+        git checkout --detach "${SIMPLE_KNN_PIN}"
+    )
+else
+    echo "[install_128.sh] submodules/simple-knn not initialized."
+    echo "[install_128.sh] Run: git submodule update --init --recursive"
+    exit 1
+fi
+
 pip install --no-deps ./submodules/diff-gaussian-rasterization
 pip install --no-deps ./submodules/simple-knn
 
