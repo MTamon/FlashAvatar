@@ -1,12 +1,21 @@
 dataset
 metrical-tracker
 **/__pycache__
+*.egg-info/
+build/
+*.so
 *avi
 *mp4
 *jpg
 *ply
-*txt
-*sh
+*.txt
+*.sh
 flame/generic_model.pkl
 flame/FLAME_masks
+
+# Explicit un-ignores (files tracked in the repo even though the patterns above
+# would otherwise exclude them).
+!requirements_128.txt
+!install_128.sh
+!README.md
 

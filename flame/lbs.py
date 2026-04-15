@@ -46,7 +46,7 @@ def stereographic_unproject(a, axis=None):
     if axis is None:
         axis = a.shape[1]
     s2 = torch.pow(a, 2).sum(1)  # batch
-    ans = torch.autograd.Variable(torch.zeros(batch, a.shape[1] + 1).cuda())  # batch*6
+    ans = torch.zeros(batch, a.shape[1] + 1, device=a.device)  # batch*6
     unproj = 2 * a / (s2 + 1).view(batch, 1).repeat(1, a.shape[1])  # batch*5
     if (axis > 0):
         ans[:, :axis] = unproj[:, :axis]  # batch*(axis-0)

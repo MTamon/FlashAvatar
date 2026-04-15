@@ -68,7 +68,7 @@ if __name__ == "__main__":
     gaussians = GaussianModel(lpt.sh_degree)
     gaussians.training_setup(opt)
     if args.start_checkpoint:
-        (model_params, gauss_params, first_iter) = torch.load(args.start_checkpoint)
+        (model_params, gauss_params, first_iter) = torch.load(args.start_checkpoint, weights_only=False)
         DeformModel.restore(model_params)
         gaussians.restore(gauss_params, opt)
 

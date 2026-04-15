@@ -154,7 +154,7 @@ def quatProduct_batch(q1, q2):
     v2 = torch.stack((q2[:,1], q2[:,2], q2[:,3]), dim=-1)
 
     r = r1 * r2 - torch.sum(v1*v2, dim=1) # [B]
-    v = r1.unsqueeze(1) * v2 + r2.unsqueeze(1) * v1 + torch.cross(v1, v2) #[B,3]
+    v = r1.unsqueeze(1) * v2 + r2.unsqueeze(1) * v1 + torch.cross(v1, v2, dim=-1) #[B,3]
     q = torch.stack((r, v[:,0], v[:,1], v[:,2]), dim=1)
 
     return q

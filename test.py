@@ -62,7 +62,7 @@ if __name__ == "__main__":
     gaussians.training_setup(opt)
 
     if args.checkpoint:
-        (model_params, gauss_params, first_iter) = torch.load(args.checkpoint)
+        (model_params, gauss_params, first_iter) = torch.load(args.checkpoint, weights_only=False)
         DeformModel.restore(model_params)
         gaussians.restore(gauss_params, opt)
 
