@@ -36,7 +36,7 @@ class Scene_mica:
         max_train_num = 10000
         train_num = min(max_train_num, self.N_frames - test_num)
         ckpt_path = os.path.join(mica_ckpt_dir, '00000.frame')
-        payload = torch.load(ckpt_path)
+        payload = torch.load(ckpt_path, weights_only=False)
         flame_params = payload['flame']
         self.shape_param = torch.as_tensor(flame_params['shape'])
         orig_w, orig_h = payload['img_size']
@@ -59,8 +59,8 @@ class Scene_mica:
             image_name_mica = str(frame_id).zfill(5) # obey mica tracking
             image_name_ori = str(frame_id+frame_delta).zfill(5)
             ckpt_path = os.path.join(mica_ckpt_dir, image_name_mica+'.frame')
-            payload = torch.load(ckpt_path)
-            
+            payload = torch.load(ckpt_path, weights_only=False)
+
             flame_params = payload['flame']
             exp_param = torch.as_tensor(flame_params['exp'])
             eyes_pose = torch.as_tensor(flame_params['eyes'])
