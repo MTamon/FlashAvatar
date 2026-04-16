@@ -12,6 +12,9 @@ build/
 *.sh
 flame/generic_model.pkl
 flame/FLAME_masks
+flame/female_model.pkl
+flame/male_model.pkl
+flame/FLAME_masks.zip
 
 # Explicit un-ignores (files tracked in the repo even though the patterns above
 # would otherwise exclude them).
