@@ -132,21 +132,156 @@ flame/
 ```
 
 ## Data Convention
-The data is organized in the following form：
+
+FlashAvatar needs four data components per identity, split across two
+directory trees.  The `--idname` you pass to `train.py` / `test.py` must
+match a name that appears in **both** `dataset/` and
+`metrical-tracker/output/`.
+
 ```
-dataset
-├── <id1_name>
-    ├── alpha # raw alpha prediction
-    ├── imgs # extracted video frames
-    ├── parsing # semantic segmentation
-├── <id2_name>
-...
-metrical-tracker
-├── output
-    ├── <id1_name>
-        ├── checkpoint
-    ├── <id2_name>
-...
+dataset/
+└── <id_name>/
+    ├── imgs/           # video frames (JPEG, RGB)
+    │   ├── 00001.jpg   # ← numbering starts at 1, NOT 0
+    │   ├── 00002.jpg
+    │   └── ...
+    ├── parsing/        # semantic segmentation masks (PNG, binary 0/255)
+    │   ├── 00001_neckhead.png
+    │   ├── 00001_mouth.png
+    │   ├── 00002_neckhead.png
+    │   ├── 00002_mouth.png
+    │   └── ...
+    └── alpha/          # foreground opacity masks (JPEG, grayscale 0–255)
+        ├── 00001.jpg
+        ├── 00002.jpg
+        └── ...
+
+metrical-tracker/
+└── output/
+    └── <id_name>/
+        └── checkpoint/     # FLAME tracking output (.frame files)
+            ├── 00000.frame # ← numbering starts at 0
+            ├── 00001.frame
+            └── ...
+```
+
+> **Frame numbering offset**: the tracker uses 0-based indexing
+> (`00000.frame`) while video frames use 1-based indexing (`00001.jpg`).
+> This is handled internally (`frame_delta = 1`).  Tracker frame N
+> corresponds to `imgs/{N+1:05d}.jpg`.
+
+### Train / test split
+
+- **Training**: frames 0 to `min(10000, N_frames − 500)`
+- **Test** (used by `test.py`): last 500 frames
+- At least ~600 frames are recommended for a meaningful split.
+
+### Preparing your own data
+
+To train FlashAvatar on a custom face, you need:
+
+1. A **monocular face video** (front-facing, relatively stable lighting)
+2. A **FLAME tracker** (metrical-tracker / MICA) to estimate per-frame
+   FLAME parameters and camera poses
+3. A **semantic segmentation model** to produce head/mouth masks
+4. A **portrait segmentation model** (or matting model) to produce alpha
+   masks
+
+#### Step 1 — Extract video frames
+
+```bash
+mkdir -p dataset/myface/imgs
+ffmpeg -i my_video.mp4 -q:v 2 -start_number 1 dataset/myface/imgs/%05d.jpg
+```
+
+Frames must be 5-digit zero-padded JPEG, starting from `00001.jpg`.
+
+#### Step 2 — Run the FLAME tracker (metrical-tracker)
+
+The tracker produces one `.frame` file per input frame, each containing:
+
+| Key | Shape | Description |
+|-----|-------|-------------|
+| `flame.shape` | `(1, 300)` | FLAME shape params (shared across all frames) |
+| `flame.exp` | `(1, 100)` | Expression params |
+| `flame.jaw` | `(1, 6)` | Jaw pose (6D rotation) |
+| `flame.eyes` | `(1, 12)` | Eye pose (left+right, 6D each) |
+| `flame.eyelids` | `(1, 2)` | Eyelid blend weights |
+| `opencv.K` | `(1, 3, 3)` | Camera intrinsic matrix |
+| `opencv.R` | `(1, 3, 3)` | Camera rotation (world→camera) |
+| `opencv.t` | `(1, 3)` | Camera translation |
+| `img_size` | `(w, h)` | Original frame resolution |
+
+```bash
+# Example (exact command depends on your tracker version):
+cd /path/to/metrical-tracker
+python tracker.py --input_dir /path/to/FlashAvatar128-/dataset/myface/imgs \
+                  --output_dir /path/to/FlashAvatar128-/metrical-tracker/output/myface
+```
+
+Output: `metrical-tracker/output/myface/checkpoint/00000.frame`, `00001.frame`, ...
+
+#### Step 3 — Generate semantic masks (parsing)
+
+Two binary masks per frame are required:
+
+| Filename pattern | Region | Used for |
+|---|---|---|
+| `XXXXX_neckhead.png` | Head + neck silhouette | Compositing GT onto background |
+| `XXXXX_mouth.png` | Mouth interior | 40× weighted loss on mouth region |
+
+Format: single-channel PNG, pixel values 0 (background) or 255 (foreground).
+
+You can produce these with any face-parsing model (e.g. BiSeNet,
+face-parsing.PyTorch, or the tracker's own mask output if available):
+
+```python
+# Pseudo-code
+for i, frame_path in enumerate(sorted(glob("dataset/myface/imgs/*.jpg"))):
+    img = load(frame_path)
+    seg = face_parsing_model(img)          # per-pixel class labels
+    head = ((seg == HEAD) | (seg == NECK)).astype(np.uint8) * 255
+    mouth = (seg == MOUTH).astype(np.uint8) * 255
+    fname = f"{i+1:05d}"
+    save_png(head,  f"dataset/myface/parsing/{fname}_neckhead.png")
+    save_png(mouth, f"dataset/myface/parsing/{fname}_mouth.png")
+```
+
+#### Step 4 — Generate alpha masks
+
+Foreground opacity per frame. 255 = person, 0 = background.
+
+```bash
+mkdir -p dataset/myface/alpha
+```
+
+Options:
+- Portrait matting model (e.g. RobustVideoMatting, MODNet)
+- Green-screen keying
+- The tracker may provide a foreground mask
+
+Output: `dataset/myface/alpha/00001.jpg`, `00002.jpg`, ... (JPEG,
+grayscale, same resolution as frames).
+
+#### Step 5 — Verify and train
+
+```bash
+# Check file counts match
+ls dataset/myface/imgs/    | wc -l   # N frames
+ls dataset/myface/alpha/   | wc -l   # N frames
+ls dataset/myface/parsing/ | wc -l   # 2 × N (neckhead + mouth per frame)
+ls metrical-tracker/output/myface/checkpoint/ | wc -l  # N .frame files
+
+# Train (short run first)
+python train.py --idname myface --iterations 5000
+
+# Full quality
+python train.py --idname myface --iterations 150000
+
+# Generate test video
+python test.py --idname myface \
+    --checkpoint dataset/myface/log/ckpt/chkpnt150000.pth
+# → dataset/myface/log/test.avi
 ```
 ## Running
 
