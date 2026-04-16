@@ -126,9 +126,11 @@ pip install --no-deps loguru==0.7.3
 # 2. pytorch3d v0.7.8 (source build against torch 2.9.1 + CUDA 12.8).
 # ----------------------------------------------------------------------------
 # NOTE: this step compiles a large CUDA extension and can take 10+ minutes.
-#       On failure, re-run with more verbose logging:
-#           pip install -v --no-deps "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.8"
-pip install --no-deps "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.8"
+# pip's --filter=blob:none clone doesn't fetch tags, so we clone manually.
+PYTORCH3D_TMP="$(mktemp -d)"
+git clone --branch v0.7.8 --depth 1 https://github.com/facebookresearch/pytorch3d.git "${PYTORCH3D_TMP}"
+pip install --no-deps "${PYTORCH3D_TMP}"
+rm -rf "${PYTORCH3D_TMP}"
 
 # ----------------------------------------------------------------------------
 # 3. Local CUDA extensions (diff-gaussian-rasterization and simple-knn).
