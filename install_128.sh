@@ -40,9 +40,10 @@ if [ -z "${CUDA_HOME:-}" ]; then
 fi
 export PATH="${CUDA_HOME}/bin:${PATH}"
 
-# Force nvcc to emit code for common modern arches; extend here if needed.
-# (Ampere sm_80/86, Ada sm_89, Hopper sm_90. Add 12.0 later for Blackwell.)
-export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-7.5;8.0;8.6;8.9;9.0}"
+# Force nvcc to emit code for common modern arches; narrow to your own GPU
+# to speed up the build (e.g. TORCH_CUDA_ARCH_LIST="12.0" for RTX 5090).
+# Turing 7.5, Ampere 8.0/8.6, Ada 8.9, Hopper 9.0, Blackwell 12.0.
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-7.5;8.0;8.6;8.9;9.0;12.0}"
 
 # Force pytorch3d / submodule setups to build with CUDA support.
 export FORCE_CUDA=1

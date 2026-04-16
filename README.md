@@ -17,7 +17,7 @@ This branch is maintained for modern PyTorch / CUDA stacks.
 | PyTorch | 2.9.1 (torchvision 0.24.1) |
 | CUDA Toolkit | 12.8 (system-installed, `nvcc` on PATH) |
 | GCC | gcc-11 / g++-11 (required by the CUDA extensions) |
-| GPU | RTX 30 / 40 / Hopper class (sm_80 / sm_86 / sm_89 / sm_90) |
+| GPU | RTX 30 / 40 / 50 / Hopper class (sm_86 / sm_89 / sm_90 / sm_120 etc.) |
 
 Support for PyTorch 2.12 + CUDA 13.0 / 13.2 is planned as a follow-up once
 PyTorch 2.12 is released.
@@ -66,8 +66,10 @@ If `pip install ./submodules/diff-gaussian-rasterization` or
 
 - Double-check `nvcc --version` reports 12.8 and is actually the one on PATH.
 - Make sure `TORCH_CUDA_ARCH_LIST` is set to the arch list of your local GPU
-  (the script defaults to `7.5;8.0;8.6;8.9;9.0`; you can narrow it to e.g.
-  `8.6` for an RTX 3090 to speed up the build).
+  (the script defaults to `7.5;8.0;8.6;8.9;9.0;12.0`; you can narrow it to
+  your own GPU to speed up the build, e.g. `12.0` for an RTX 5090).
+  Check your compute capability with:
+  `nvidia-smi --query-gpu=compute_cap --format=csv,noheader`
 - Re-run with verbose output: `pip install -v --no-deps ./submodules/simple-knn`.
 
 If the build still fails, save the full compiler log and report back; the
@@ -88,6 +90,47 @@ conda install pytorch3d -c pytorch3d
 ```
 
 This path is no longer actively maintained.
+
+### FLAME model assets (required before training)
+
+FlashAvatar uses the [FLAME](https://flame.is.tue.mpg.de/) 3D morphable
+model.  Two asset files are **not** included in this repository (license
+restrictions) and must be downloaded manually.
+
+1. Register at https://flame.is.tue.mpg.de/ and accept the license.
+2. Download **FLAME 2020** and extract `generic_model.pkl`:
+
+   ```bash
+   cp /path/to/FLAME2020/generic_model.pkl flame/generic_model.pkl
+   ```
+
+3. On the same download page, download **FLAME Vertex Masks**
+   (`FLAME_masks.zip`).  Note: the zip extracts its contents **flat** (no
+   subdirectory is created), so create the target directory first:
+
+   ```bash
+   mkdir -p flame/FLAME_masks
+   cd flame/FLAME_masks
+   unzip /path/to/FLAME_masks.zip    # yields FLAME_masks.pkl, FLAME_masks.gif, readme
+   cd ../..
+   ```
+
+After this step the following files must exist:
+
+```
+flame/
+├── generic_model.pkl          # FLAME 2020 model
+├── FLAME_masks/
+│   └── FLAME_masks.pkl        # vertex region masks
+├── FlameMesh.obj              # (already in repo)
+├── landmark_embedding.npy     # (already in repo)
+├── blendshapes/               # (already in repo)
+│   ├── l_eyelid.npy
+│   └── r_eyelid.npy
+└── mediapipe/                 # (already in repo)
+    └── mediapipe_landmark_embedding.npz
+```
+
 ## Data Convention
 The data is organized in the following form：
 ```
@@ -106,15 +149,37 @@ metrical-tracker
 ...
 ```
 ## Running
+
+### Quick start with the example data
+
+Download the [example](https://drive.google.com/file/d/1_WLvlmHD73jOAO178N7eX5UQqlrL2ghD/view?usp=drive_link)
+with pre-processed data and pre-trained model.  Extract it so that **both**
+`dataset/<id_name>/` and `metrical-tracker/output/<id_name>/checkpoint/` exist.
+The `--idname` you pass must match a name that appears in both directories.
+
+For example, the download contains an `Obama` sequence:
+
+```
+dataset/Obama/          ← video frames, parsing, alpha
+metrical-tracker/output/Obama/checkpoint/   ← .frame files (FLAME params)
+```
+
+- **Training (short run for verification)**
+```shell
+python train.py --idname Obama --iterations 5000
+```
+
+- **Training (full quality)**
+```shell
+python train.py --idname <id_name>
+```
+
 - **Evaluating pre-trained model**
 ```shell
 python test.py --idname <id_name> --checkpoint dataset/<id_name>/log/ckpt/chkpnt.pth
 ```
--  **Training on your own data** 
-```shell
-python train.py --idname <id_name>
-```
-Download the [example](https://drive.google.com/file/d/1_WLvlmHD73jOAO178N7eX5UQqlrL2ghD/view?usp=drive_link) with pre-processed data and pre-trained model for a try!
+
+Output video is saved to `dataset/<id_name>/log/test.avi`.
 
 ## Citation
 ```
