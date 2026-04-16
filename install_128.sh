@@ -131,7 +131,7 @@ pip install --no-deps loguru==0.7.3
 PYTORCH3D_TMP="$(mktemp -d)"
 git -C "${PYTORCH3D_TMP}" init -q
 git -C "${PYTORCH3D_TMP}" remote add origin https://github.com/facebookresearch/pytorch3d.git
-git -C "${PYTORCH3D_TMP}" fetch --depth 1 origin tag v0.7.8
+git -C "${PYTORCH3D_TMP}" fetch --depth 1 origin tag V0.7.8
 git -C "${PYTORCH3D_TMP}" checkout FETCH_HEAD
 pip install --no-deps "${PYTORCH3D_TMP}"
 rm -rf "${PYTORCH3D_TMP}"
