@@ -144,14 +144,13 @@ rm -rf "${PYTORCH3D_TMP}"
 #
 # simple-knn needs a newer commit than the submodule pointer (the original
 # camenduru commit uses torch's deprecated .data API and is missing <float.h>,
-# both of which break on PyTorch 2.x / CUDA 12.x). Force-check out the known-
-# good commit before building. Safe no-op if already on that commit.
-SIMPLE_KNN_PIN="60f461ff977c577ab43e29c9e4f7a4480eecc87a"
+# both of which break on PyTorch 2.x / CUDA 12.x). Force-check out the latest
+# main which contains the fixes. 60f461f is currently HEAD of main.
 if [ -d submodules/simple-knn/.git ] || [ -f submodules/simple-knn/.git ]; then
     (
         cd submodules/simple-knn
-        git fetch origin "${SIMPLE_KNN_PIN}" 2>/dev/null || git fetch origin
-        git checkout --detach "${SIMPLE_KNN_PIN}"
+        git fetch origin main
+        git checkout origin/main
     )
 else
     echo "[install_128.sh] submodules/simple-knn not initialized."
