@@ -126,9 +126,13 @@ pip install --no-deps loguru==0.7.3
 # 2. pytorch3d v0.7.8 (source build against torch 2.9.1 + CUDA 12.8).
 # ----------------------------------------------------------------------------
 # NOTE: this step compiles a large CUDA extension and can take 10+ minutes.
-# pip's --filter=blob:none clone doesn't fetch tags, so we clone manually.
+# Shallow clone + --branch doesn't reliably resolve tags, so we use
+# git-init + fetch-by-tag which works regardless of server advertisement.
 PYTORCH3D_TMP="$(mktemp -d)"
-git clone --branch v0.7.8 --depth 1 https://github.com/facebookresearch/pytorch3d.git "${PYTORCH3D_TMP}"
+git -C "${PYTORCH3D_TMP}" init -q
+git -C "${PYTORCH3D_TMP}" remote add origin https://github.com/facebookresearch/pytorch3d.git
+git -C "${PYTORCH3D_TMP}" fetch --depth 1 origin tag v0.7.8
+git -C "${PYTORCH3D_TMP}" checkout FETCH_HEAD
 pip install --no-deps "${PYTORCH3D_TMP}"
 rm -rf "${PYTORCH3D_TMP}"
 
