@@ -152,18 +152,6 @@ class ContextPath(nn.Module):
         return feat8, feat16_up, feat32_up
 
 
-class SpatialPath(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = ConvBNReLU(3, 64, ks=7, stride=2, padding=3)
-        self.conv2 = ConvBNReLU(64, 64, ks=3, stride=2, padding=1)
-        self.conv3 = ConvBNReLU(64, 64, ks=3, stride=2, padding=1)
-        self.conv_out = ConvBNReLU(64, 128, ks=1, stride=1, padding=0)
-
-    def forward(self, x):
-        return self.conv_out(self.conv3(self.conv2(self.conv1(x))))
-
-
 class FeatureFusionModule(nn.Module):
     def __init__(self, in_chan, out_chan):
         super().__init__()
@@ -186,12 +174,17 @@ class FeatureFusionModule(nn.Module):
 
 
 class BiSeNet(nn.Module):
-    """BiSeNet face-parsing. Input RGB 512x512, output (n_classes,H,W) logits."""
+    """BiSeNet face-parsing as published in face-parsing.PyTorch.
+
+    Note: unlike the canonical BiSeNet paper, this variant has no separate
+    SpatialPath module. The ResNet stage-2 output (``feat_res8``) is fed
+    directly into FFM as the spatial feature, so the state_dict only
+    contains ``cp.*``, ``ffm.*`` and ``conv_out*.*`` keys.
+    """
 
     def __init__(self, n_classes: int = 19):
         super().__init__()
         self.cp = ContextPath()
-        self.sp = SpatialPath()
         self.ffm = FeatureFusionModule(256, 256)
         self.conv_out = BiSeNetOutput(256, 256, n_classes)
         self.conv_out16 = BiSeNetOutput(128, 64, n_classes)
@@ -199,11 +192,12 @@ class BiSeNet(nn.Module):
 
     def forward(self, x):
         h, w = x.size()[2:]
-        feat_cp8, feat_cp16, _ = self.cp(x)
-        feat_sp = self.sp(x)
-        feat_fuse = self.ffm(feat_sp, feat_cp8)
+        feat_res8, feat_cp8, feat_cp16 = self.cp(x)
+        feat_fuse = self.ffm(feat_res8, feat_cp8)
         feat_out = self.conv_out(feat_fuse)
-        feat_out16 = self.conv_out16(feat_cp16)
+        feat_out16 = self.conv_out16(feat_cp8)
+        feat_out32 = self.conv_out32(feat_cp16)
         feat_out = F.interpolate(feat_out, (h, w), mode='bilinear', align_corners=True)
         feat_out16 = F.interpolate(feat_out16, (h, w), mode='bilinear', align_corners=True)
-        return feat_out, feat_out16, feat_out16  # match upstream 3-tuple signature
+        feat_out32 = F.interpolate(feat_out32, (h, w), mode='bilinear', align_corners=True)
+        return feat_out, feat_out16, feat_out32
