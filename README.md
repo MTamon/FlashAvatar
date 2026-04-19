@@ -189,19 +189,26 @@ To train FlashAvatar on a custom face, you need:
 
 #### Automated pipeline
 
-A ready-to-run end-to-end pipeline is provided in `preprocess/`:
+A ready-to-run pipeline is provided in `preprocess/`, split across the
+metrical-tracker boundary so the tracker can live in its own conda env:
 
 ```bash
-python scripts/preprocess.py --idname myface --video my.mp4 \
-    --crop       # or --no-crop
+# 1. FlashAvatar env — extract + BiSeNet parsing + RVM matting
+python scripts/preprocess.py prepare --idname myface --video my.mp4
+
+# 2. tracker env (one-time setup, then run)
+bash scripts/setup_metrical_tracker.sh
+bash scripts/run_tracker.sh myface
+
+# 3. FlashAvatar env — crop/resize + K/img_size adjustment
+python scripts/preprocess.py finalize --idname myface --crop
 ```
 
-It runs ffmpeg frame extraction → BiSeNet face parsing → RobustVideoMatting
-alpha → metrical-tracker (external, optional) → final square crop + resize
-to `--size` (default 512) with camera intrinsic `K` rewritten to match.
-See [docs/preprocessing.md](docs/preprocessing.md) for the full design and
-checkpoint locations. The remaining sections below describe the same steps
-performed manually.
+`--crop` / `--no-crop` (on `finalize`) only affects the final square crop
+and the camera `K` rewrite; parsing, matting and the tracker never rerun
+when the crop flag changes. See [docs/preprocessing.md](docs/preprocessing.md)
+for the full design, checkpoint locations and coordinate-system contract.
+The remaining sections below describe the same steps performed manually.
 
 #### Step 1 — Extract video frames
 

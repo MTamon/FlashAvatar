@@ -16,10 +16,14 @@ flame/female_model.pkl
 flame/male_model.pkl
 flame/FLAME_masks.zip
 
+# Cloned external tooling (e.g. metrical-tracker). Kept outside git.
+external/
+
 # Explicit un-ignores (files tracked in the repo even though the patterns above
 # would otherwise exclude them).
 !requirements_128.txt
 !install_128.sh
+!scripts/*.sh
 !README.md
 
 example.zip

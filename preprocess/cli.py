@@ -1,27 +1,29 @@
-"""End-to-end preprocessing orchestrator.
+"""Two-stage preprocessing orchestrator.
 
-Layout produced under FlashAvatar's repo root:
+The pipeline is split along the metrical-tracker boundary so that the
+heavy-weight tracker can run in its own conda environment:
 
-    dataset/<idname>/
-        raw/imgs/              # full-resolution frames (ffmpeg output)
-        raw/parsing/           # full-resolution parsing masks
-        raw/alpha/             # full-resolution alpha masks
-        imgs/                  # --size x --size, post crop/no-crop
-        parsing/               # --size x --size
-        alpha/                 # --size x --size
+  1. `prepare`  — extract + parsing + matting.
+                  Runs inside the FlashAvatar python environment.
+                  Writes dataset/<id>/raw/{imgs,parsing,alpha}/.
 
-    metrical-tracker/output/<idname>/
-        checkpoint_raw/        # tracker output at native resolution
-        checkpoint/            # adjusted .frame files for --size x --size
+  2. (external) — activate the tracker env and run metrical-tracker on
+                  dataset/<id>/raw/imgs/, placing its output under
+                  metrical-tracker/output/<id>/checkpoint_raw/.
+                  See scripts/setup_metrical_tracker.sh for env setup
+                  and scripts/run_tracker.sh for a convenience wrapper.
 
-Upstream stages (parsing / matting / tracker) always work on `raw/`. The
-crop stage is the only place that interprets `--crop` / `--no-crop` and
-writes the final directory used by `train.py`.
+  3. `finalize` — crop/resize + K/img_size adjustment.
+                  Runs inside the FlashAvatar python environment.
+                  Writes dataset/<id>/{imgs,parsing,alpha}/ and
+                  metrical-tracker/output/<id>/checkpoint/.
+
+`finalize` is the only stage that interprets `--crop` / `--no-crop`, so
+switching the crop flag never requires rerunning any stage above it.
 """
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
 from pathlib import Path
 
@@ -46,69 +48,70 @@ def _infer_image_size(imgs_dir: Path) -> tuple[int, int]:
         return im.size  # (W, H)
 
 
+def _add_common(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--idname", required=True,
+                     help="Identity name. Used as the dataset subdirectory.")
+    sub.add_argument("--repo-root", type=Path, default=_repo_root(),
+                     help="FlashAvatar repository root (default: autodetected).")
+    sub.add_argument("--overwrite", action="store_true",
+                     help="Re-run stages even when their outputs already exist.")
+
+
 def build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="preprocess",
-        description="FlashAvatar data preparation pipeline",
+        description="FlashAvatar data preparation pipeline (split across "
+                    "the metrical-tracker boundary).",
     )
-    p.add_argument("--idname", required=True,
-                   help="Identity name. Used as the dataset subdirectory.")
-    p.add_argument("--video", type=Path, default=None,
-                   help="Source video. Skipped if raw/imgs already populated.")
-    p.add_argument("--repo-root", type=Path, default=_repo_root(),
-                   help="FlashAvatar repository root (default: autodetected).")
+    sub = p.add_subparsers(dest="command", required=True)
 
-    p.add_argument("--size", type=int, default=512,
-                   help="Output image side length (default: 512).")
-    crop_group = p.add_mutually_exclusive_group()
+    # ---- prepare ----
+    pp = sub.add_parser(
+        "prepare",
+        help="Run stages that do NOT require metrical-tracker "
+             "(extract + parsing + matting).",
+    )
+    _add_common(pp)
+    pp.add_argument("--video", type=Path, default=None,
+                    help="Source video. Skipped if raw/imgs already populated.")
+    pp.add_argument("--device", default="cuda",
+                    help="Torch device for parsing / matting (default: cuda).")
+    pp.add_argument("--bisenet-weights", type=Path, default=None,
+                    help="Path to the BiSeNet 79999_iter.pth checkpoint.")
+    pp.add_argument("--rvm-variant", default="mobilenetv3",
+                    choices=["mobilenetv3", "resnet50"])
+    pp.add_argument("--skip-extract", action="store_true")
+    pp.add_argument("--skip-parsing", action="store_true")
+    pp.add_argument("--skip-matting", action="store_true")
+
+    # ---- finalize ----
+    fp = sub.add_parser(
+        "finalize",
+        help="Apply crop/resize + adjust camera K. Requires metrical-tracker "
+             "output under metrical-tracker/output/<idname>/checkpoint_raw/.",
+    )
+    _add_common(fp)
+    fp.add_argument("--size", type=int, default=512,
+                    help="Output image side length (default: 512).")
+    crop_group = fp.add_mutually_exclusive_group()
     crop_group.add_argument("--crop", dest="crop", action="store_true",
                             help="Tight face-centred square crop (default).")
     crop_group.add_argument("--no-crop", dest="crop", action="store_false",
                             help="Centre-square crop only, no face detection.")
-    p.set_defaults(crop=True)
-    p.add_argument("--crop-pad", type=float, default=0.15,
-                   help="Fractional padding around the head bbox (crop=on).")
+    fp.set_defaults(crop=True)
+    fp.add_argument("--crop-pad", type=float, default=0.15,
+                    help="Fractional padding around the head bbox (crop=on).")
 
-    p.add_argument("--device", default="cuda",
-                   help="Torch device for parsing / matting (default: cuda).")
-
-    p.add_argument("--skip-extract", action="store_true")
-    p.add_argument("--skip-parsing", action="store_true")
-    p.add_argument("--skip-matting", action="store_true")
-    p.add_argument("--skip-tracker", action="store_true",
-                   help="Skip tracker step. Requires tracker output to "
-                        "already exist, or the crop step will fail.")
-    p.add_argument("--skip-crop", action="store_true",
-                   help="Skip the final crop/resize step (outputs remain in raw/).")
-
-    p.add_argument("--bisenet-weights", type=Path, default=None,
-                   help="Path to the BiSeNet 79999_iter.pth checkpoint.")
-    p.add_argument("--rvm-variant", default="mobilenetv3",
-                   choices=["mobilenetv3", "resnet50"])
-    p.add_argument("--tracker-cmd", default=None,
-                   help="Shell template for invoking metrical-tracker. "
-                        "See preprocess.tracker.run_tracker for placeholders.")
-
-    p.add_argument("--overwrite", action="store_true",
-                   help="Re-run stages even when their outputs already exist.")
     return p
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_argparser().parse_args(argv)
-
+def cmd_prepare(args: argparse.Namespace) -> int:
     repo = Path(args.repo_root).resolve()
     dataset_dir = repo / "dataset" / args.idname
     raw = dataset_dir / "raw"
     raw_imgs = raw / "imgs"
     raw_parsing = raw / "parsing"
     raw_alpha = raw / "alpha"
-    final_imgs = dataset_dir / "imgs"
-    final_parsing = dataset_dir / "parsing"
-    final_alpha = dataset_dir / "alpha"
-
-    ckpt_raw = repo / "metrical-tracker" / "output" / args.idname / "checkpoint_raw"
-    ckpt_final = tracker_mod.checkpoint_dir(repo, args.idname)
 
     # 1. extract
     if not args.skip_extract:
@@ -145,39 +148,49 @@ def main(argv: list[str] | None = None) -> int:
             overwrite=args.overwrite,
         )
 
-    # 4. tracker
-    if not args.skip_tracker:
-        if tracker_mod.count_frames(ckpt_raw) >= n_frames and not args.overwrite:
-            print(f"[tracker] reusing {ckpt_raw}")
-        elif args.tracker_cmd:
-            print(f"[tracker] running: {args.tracker_cmd}")
-            ckpt_raw.mkdir(parents=True, exist_ok=True)
-            tracker_mod.run_tracker(
-                args.tracker_cmd, raw_imgs, ckpt_raw, args.idname,
-            )
-        else:
-            # The user may have run the tracker by hand straight into the final
-            # dir. Accept that too.
-            if tracker_mod.count_frames(ckpt_final) > 0 and \
-                    tracker_mod.count_frames(ckpt_raw) == 0:
-                print(f"[tracker] copying {ckpt_final} -> {ckpt_raw} "
-                      f"(treating existing final output as raw).")
-                ckpt_raw.mkdir(parents=True, exist_ok=True)
-                for f in ckpt_final.glob("*.frame"):
-                    shutil.copy2(f, ckpt_raw / f.name)
-            else:
-                tracker_mod.verify_or_hint(ckpt_raw, n_frames)
+    print(
+        f"[prepare] done. Next: run metrical-tracker on\n"
+        f"    {raw_imgs}\n"
+        f"and place its output at\n"
+        f"    {repo / 'metrical-tracker' / 'output' / args.idname / 'checkpoint_raw'}\n"
+        f"then run `python scripts/preprocess.py finalize --idname {args.idname}`."
+    )
+    return 0
 
-    # 5. crop / resize / K adjustment
-    if args.skip_crop:
-        print("[crop] skipped (raw outputs only)")
-        return 0
+
+def cmd_finalize(args: argparse.Namespace) -> int:
+    repo = Path(args.repo_root).resolve()
+    dataset_dir = repo / "dataset" / args.idname
+    raw = dataset_dir / "raw"
+    raw_imgs = raw / "imgs"
+    raw_parsing = raw / "parsing"
+    raw_alpha = raw / "alpha"
+    final_imgs = dataset_dir / "imgs"
+    final_parsing = dataset_dir / "parsing"
+    final_alpha = dataset_dir / "alpha"
+
+    ckpt_raw = repo / "metrical-tracker" / "output" / args.idname / "checkpoint_raw"
+    ckpt_final = tracker_mod.checkpoint_dir(repo, args.idname)
+
+    n_frames = len(list(raw_imgs.glob("*.jpg")))
+    if n_frames == 0:
+        print(f"no frames under {raw_imgs}; run `preprocess prepare` first.",
+              file=sys.stderr)
+        return 1
+
+    # Accept tracker output placed at either checkpoint_raw/ or checkpoint/.
+    if tracker_mod.count_frames(ckpt_raw) == 0 and \
+            tracker_mod.count_frames(ckpt_final) > 0:
+        print(f"[finalize] no {ckpt_raw.name}/ but {ckpt_final.name}/ exists; "
+              f"treating the latter as the raw tracker output.")
+        ckpt_raw = ckpt_final
+    tracker_mod.verify_or_hint(ckpt_raw, n_frames)
 
     img_wh = _infer_image_size(raw_imgs)
     bbox = crop_mod.compute_bbox(
         raw_parsing if args.crop else None, img_wh, crop=args.crop,
     )
-    print(f"[crop] bbox x0={bbox.x0} y0={bbox.y0} size={bbox.size} "
+    print(f"[finalize] bbox x0={bbox.x0} y0={bbox.y0} size={bbox.size} "
           f"-> {args.size}x{args.size} (crop={args.crop})")
 
     crop_mod.apply_to_images(raw_imgs, final_imgs, bbox, args.size,
@@ -190,6 +203,16 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[done] dataset/{args.idname}/ ready for train.py")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_argparser().parse_args(argv)
+    if args.command == "prepare":
+        return cmd_prepare(args)
+    if args.command == "finalize":
+        return cmd_finalize(args)
+    print(f"unknown command: {args.command}", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

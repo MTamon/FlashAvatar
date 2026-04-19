@@ -1,11 +1,10 @@
-"""Metrical-tracker integration.
+"""Helpers for consuming metrical-tracker output.
 
-The tracker itself lives outside this repository and typically requires its
-own environment. This module provides a thin subprocess wrapper plus small
-helpers to verify / locate the resulting `.frame` checkpoints.
-
-If `metrical-tracker/output/<id>/checkpoint/` already contains .frame files
-(matching the expected count), the tracker step is skipped.
+The tracker itself runs in a separate conda environment (see
+`scripts/setup_metrical_tracker.sh`). This module only provides utilities
+for locating and validating its output from within the FlashAvatar env.
+A small subprocess wrapper (`run_tracker`) is kept for callers that want
+to shell out to the tracker's `python tracker.py ...` entry point.
 """
 from __future__ import annotations
 
@@ -18,6 +17,10 @@ def checkpoint_dir(repo_root: Path, idname: str) -> Path:
     return Path(repo_root) / "metrical-tracker" / "output" / idname / "checkpoint"
 
 
+def raw_checkpoint_dir(repo_root: Path, idname: str) -> Path:
+    return Path(repo_root) / "metrical-tracker" / "output" / idname / "checkpoint_raw"
+
+
 def count_frames(ckpt_dir: Path) -> int:
     ckpt_dir = Path(ckpt_dir)
     if not ckpt_dir.is_dir():
@@ -27,14 +30,10 @@ def count_frames(ckpt_dir: Path) -> int:
 
 def run_tracker(tracker_cmd: str, imgs_dir: Path, ckpt_dir: Path,
                 idname: str) -> None:
-    """Invoke an external metrical-tracker command.
+    """Invoke an external metrical-tracker command (optional helper).
 
-    `tracker_cmd` is a shell command template. These placeholders are expanded
-    before execution:
-        {imgs_dir} {ckpt_dir} {idname}
-    e.g. `tracker_cmd =
-        "python /opt/metrical-tracker/tracker.py --input_dir {imgs_dir} "
-        "--output_dir metrical-tracker/output/{idname}"`
+    `tracker_cmd` is a shell template. Placeholders `{imgs_dir}`,
+    `{ckpt_dir}`, `{idname}` are substituted before execution.
     """
     cmd_str = tracker_cmd.format(
         imgs_dir=str(imgs_dir), ckpt_dir=str(ckpt_dir), idname=idname,
@@ -47,8 +46,11 @@ def verify_or_hint(ckpt_dir: Path, expected: int) -> None:
     if found == 0:
         raise FileNotFoundError(
             f"metrical-tracker output not found at {ckpt_dir}.\n"
-            f"Run the tracker manually (see docs/preprocessing.md) or pass "
-            f"--tracker-cmd to invoke it from this script."
+            f"Set up the tracker env with:\n"
+            f"    bash scripts/setup_metrical_tracker.sh\n"
+            f"then run it (conda activate tracker; python tracker.py ...) or\n"
+            f"    bash scripts/run_tracker.sh <idname>\n"
+            f"before re-running `preprocess finalize`."
         )
     if expected and found < expected:
         print(f"[tracker] warning: found {found} .frame files, expected "

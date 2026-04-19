@@ -8,64 +8,128 @@ monocular video into the four inputs `train.py` expects:
 3. `dataset/<idname>/alpha/XXXXX.jpg`
 4. `metrical-tracker/output/<idname>/checkpoint/XXXXX.frame`
 
-## Overview
+## Two-stage pipeline (split across the tracker boundary)
+
+The heavy-weight FLAME tracker (metrical-tracker) runs in its own conda
+env, so the pipeline is split into three pieces. The FlashAvatar env
+drives steps 1 and 3; the tracker env drives step 2.
 
 ```
 video.mp4
    │ ffmpeg
    ▼
-raw/imgs/*.jpg  ──► BiSeNet  ──► raw/parsing/*_{neckhead,mouth}.png
-                └► RVM       ──► raw/alpha/*.jpg
-                └► tracker   ──► checkpoint_raw/*.frame
-                                         │
-                  ┌──────────────────────┘
-                  ▼
-              crop stage  (square bbox + resize to 512 + K adjustment)
-                  │
-                  ▼
-    dataset/<id>/{imgs,parsing,alpha}/   +   checkpoint/*.frame
+raw/imgs/*.jpg  ──► BiSeNet  ──► raw/parsing/*_{neckhead,mouth}.png       │
+                └► RVM       ──► raw/alpha/*.jpg                          │  1. prepare (FlashAvatar env)
+                                                                          │
+          ─────────────────── activate tracker env ────────────────────── ─
+                                                                          │
+raw/imgs/*.jpg  ──► metrical-tracker ──► checkpoint_raw/*.frame           │  2. tracker (tracker env)
+                                                                          │
+          ─────────────────── back to FlashAvatar env ─────────────────── ─
+                                                                          │
+   │ crop + resize to --size + K/img_size adjustment                      │  3. finalize (FlashAvatar env)
+   ▼                                                                      │
+dataset/<id>/{imgs,parsing,alpha}/    +    checkpoint/*.frame
 ```
 
-**Coordinate-system contract**: parsing, matting and the tracker all run at
-the original frame resolution. The crop stage is the only place that
-interprets `--crop` / `--no-crop`, so those upstream modules need no
-awareness of the flag.
+**Coordinate-system contract**: stages 1 and 2 all run at the original
+frame resolution. Stage 3 is the only place that interprets `--crop` /
+`--no-crop`, so those upstream modules need no awareness of the flag.
+Switching the crop flag never requires rerunning the tracker.
 
-## Dependencies
+---
+
+## 1. `preprocess.py prepare` — extract / parsing / matting
+
+Runs inside the FlashAvatar env (same `.venv` / conda env used for
+`train.py`).
+
+```bash
+python scripts/preprocess.py prepare \
+    --idname myface \
+    --video /path/to/my_video.mp4
+```
+
+Outputs:
+
+```
+dataset/myface/raw/imgs/00001.jpg ...   # native resolution
+dataset/myface/raw/parsing/*.png        # native resolution
+dataset/myface/raw/alpha/*.jpg          # native resolution
+```
+
+Stage skips: `--skip-extract`, `--skip-parsing`, `--skip-matting`.
 
 | Stage | Dependency | Notes |
 |---|---|---|
 | extract | `ffmpeg` on PATH | — |
-| parsing | BiSeNet (vendored under `preprocess/models/bisenet.py`) | checkpoint `79999_iter.pth` from [face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch). Auto-downloaded via `gdown` if installed. |
-| matting | [RobustVideoMatting](https://github.com/PeterL1n/RobustVideoMatting) | Fetched via `torch.hub.load` on first run (needs internet). |
-| tracker | [metrical-tracker](https://github.com/Zielon/metrical-tracker) | External tool. Either run by hand or pass `--tracker-cmd` template. |
-| crop | `Pillow`, `numpy`, `torch` | Already in `requirements_128.txt`. |
+| parsing | BiSeNet (vendored under `preprocess/models/bisenet.py`, [face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch) MIT) | checkpoint `79999_iter.pth` auto-downloaded via `gdown` if installed; pass `--bisenet-weights PATH` to use a manual copy. |
+| matting | [RobustVideoMatting](https://github.com/PeterL1n/RobustVideoMatting) | fetched via `torch.hub.load` on first run (needs internet). `--rvm-variant mobilenetv3\|resnet50`. |
 
-## Quick start
+---
+
+## 2. metrical-tracker — runs in its own env
+
+metrical-tracker requires pytorch 1.12 / python 3.9 / CUDA 11.x, which
+conflicts with FlashAvatar's environment. Set it up once with:
 
 ```bash
-python scripts/preprocess.py \
+bash scripts/setup_metrical_tracker.sh
+```
+
+This clones upstream into `external/metrical-tracker/`, creates a conda
+env (default name `tracker`), installs PyTorch 1.12 + CUDA 11.3 +
+requirements, and runs the upstream `install.sh`. License-gated FLAME /
+MICA assets may need to be placed manually — follow the upstream
+instructions at https://github.com/Zielon/metrical-tracker if the
+install.sh step prompts for them.
+
+Overridable env vars: `TRACKER_DIR`, `ENV_NAME`, `PY_VERSION`, `CUDA`.
+
+Then run the tracker on the raw frames:
+
+```bash
+bash scripts/run_tracker.sh myface
+```
+
+This activates the `tracker` env, runs `python tracker.py --input_dir
+... --output_dir ...`, and renames the resulting `checkpoint/` directory
+to `checkpoint_raw/` (the convention expected by the finalize step).
+
+Manual equivalent:
+
+```bash
+conda activate tracker
+cd external/metrical-tracker
+python tracker.py \
+    --input_dir /.../dataset/myface/raw/imgs \
+    --output_dir /.../metrical-tracker/output/myface
+# then mv .../output/myface/checkpoint .../output/myface/checkpoint_raw
+```
+
+---
+
+## 3. `preprocess.py finalize` — crop / resize / K adjustment
+
+Back in the FlashAvatar env:
+
+```bash
+python scripts/preprocess.py finalize \
     --idname myface \
-    --video /path/to/my_video.mp4 \
-    --crop \
+    --crop           # or --no-crop
     --size 512
 ```
 
-Resulting tree:
+Outputs:
 
 ```
-dataset/myface/
-├── raw/
-│   ├── imgs/00001.jpg ...       # native resolution
-│   ├── parsing/*.png            # native resolution
-│   └── alpha/*.jpg              # native resolution
-├── imgs/00001.jpg ...           # 512x512, face-centred crop
-├── parsing/*.png                # 512x512, matching crop
-└── alpha/*.jpg                  # 512x512, matching crop
+dataset/myface/imgs/00001.jpg ...           # --size x --size
+dataset/myface/parsing/*.png                # --size x --size
+dataset/myface/alpha/*.jpg                  # --size x --size
 
 metrical-tracker/output/myface/
-├── checkpoint_raw/*.frame       # tracker output, native K
-└── checkpoint/*.frame           # rewritten K / img_size = (512, 512)
+├── checkpoint_raw/*.frame                  # tracker output (unchanged)
+└── checkpoint/*.frame                      # rewritten K / img_size
 ```
 
 Then:
@@ -74,59 +138,27 @@ Then:
 python train.py --idname myface --iterations 5000
 ```
 
-## Crop on / off
+### Crop on / off
 
-- `--crop` (default): derives a single square bbox that covers the union of
-  `*_neckhead.png` masks (padded by `--crop-pad`, default 0.15) and uses it
-  for every frame. This gives a stable, non-jittery crop centred on the
-  face. Camera intrinsics `K` are rescaled accordingly.
+- `--crop` (default): derives a single square bbox that covers the union
+  of `*_neckhead.png` masks (padded by `--crop-pad`, default 0.15) and
+  uses it for every frame. Stable, non-jittery, face-centred.
 - `--no-crop`: no face detection. The largest centred square is cropped
   from the source frame and resized to `--size`. Useful when the source
   video is already cropped or square.
 
-Because parsing, matting and the tracker run before the crop stage and
-always on the full frame, switching `--crop` / `--no-crop` does **not**
-require rerunning them. Just rerun `preprocess` with `--skip-parsing
---skip-matting --skip-tracker` to re-apply a different crop.
+Because parsing, matting and the tracker all run on the full frame,
+switching `--crop` / `--no-crop` only requires rerunning `finalize`.
 
-## Skipping stages
-
-Individual stages can be skipped when their outputs already exist:
-
-```bash
-# Only (re)run the crop stage, e.g. to change --size or toggle --crop.
-python scripts/preprocess.py --idname myface \
-    --skip-extract --skip-parsing --skip-matting --skip-tracker \
-    --no-crop --size 512
-```
-
-## Metrical-tracker
-
-The tracker is an external tool with its own environment. Two options:
-
-1. **Run it by hand**, writing output to
-   `metrical-tracker/output/<idname>/checkpoint_raw/` and then call
-   `preprocess` with `--skip-tracker` so the crop stage picks it up.
-2. **Delegate to the script** by providing a shell template via
-   `--tracker-cmd`. Available placeholders: `{imgs_dir}`, `{ckpt_dir}`,
-   `{idname}`. Example:
-
-   ```bash
-   python scripts/preprocess.py --idname myface --video my.mp4 \
-       --tracker-cmd "python /opt/metrical-tracker/tracker.py \
-                      --input_dir {imgs_dir} \
-                      --output_dir metrical-tracker/output/{idname}"
-   ```
-
-The tracker output may go either to `checkpoint_raw/` or `checkpoint/`; the
-script auto-detects and promotes in that order.
+---
 
 ## Model checkpoints
 
 | Model | Source | Expected location |
 |---|---|---|
-| BiSeNet `79999_iter.pth` | [zllrunning/face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch) (Google Drive) | `preprocess_weights/79999_iter.pth` (auto if `gdown` installed; else download manually and put there, or pass `--bisenet-weights PATH`) |
-| RVM | `torch.hub.load("PeterL1n/RobustVideoMatting", "mobilenetv3")` | torch hub cache |
+| BiSeNet `79999_iter.pth` | [zllrunning/face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch) (Google Drive) | `preprocess_weights/79999_iter.pth` (auto if `gdown` installed; else download manually or pass `--bisenet-weights PATH`). |
+| RVM | `torch.hub.load("PeterL1n/RobustVideoMatting", ...)` | torch hub cache. |
+| metrical-tracker / MICA / FLAME | see upstream | handled by `scripts/setup_metrical_tracker.sh` + license-gated manual steps. |
 
 ## K adjustment details
 
@@ -149,5 +181,5 @@ cy' = (cy - y0) * s_scale
 img_size' = (s, s)
 ```
 
-This is what `preprocess.crop.adjusted_K` and `adjust_frame_files` apply to
-every `.frame` file.
+`preprocess.crop.adjusted_K` / `adjust_frame_files` apply this to every
+`.frame` written to `checkpoint/`.
