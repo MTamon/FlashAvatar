@@ -50,6 +50,22 @@ fi
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 
+# Sanity-check the env has the packages tracker.py imports.
+missing=()
+for mod in cv2 mediapipe face_alignment torch numpy; do
+  if ! python -c "import $mod" >/dev/null 2>&1; then
+    missing+=("$mod")
+  fi
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "error: the '$ENV_NAME' env is missing: ${missing[*]}" >&2
+  echo "Repair with:" >&2
+  echo "    bash scripts/setup_metrical_tracker.sh" >&2
+  echo "or manually:" >&2
+  echo "    conda activate $ENV_NAME && pip install ${missing[*]}" >&2
+  exit 1
+fi
+
 mkdir -p "$out_dir"
 cd "$abs_tracker_dir"
 

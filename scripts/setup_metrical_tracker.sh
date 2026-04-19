@@ -7,16 +7,21 @@
 # Usage:
 #   bash scripts/setup_metrical_tracker.sh
 #
+# The script is idempotent: re-running it repairs missing dependencies
+# (e.g. opencv-python) without re-cloning or recreating the conda env.
+#
 # Overridable environment variables:
 #   TRACKER_DIR   target dir for the clone (default: external/metrical-tracker)
 #   ENV_NAME      conda env name          (default: tracker)
 #   PY_VERSION    python version          (default: 3.9)
 #   CUDA          cudatoolkit spec         (default: 11.3)
+#   SKIP_ASSETS   if set, skip running upstream install.sh (asset download)
 #
 # Notes on license-gated assets (FLAME 2020 etc.):
 # metrical-tracker / MICA need assets from flame.is.tue.mpg.de that require
 # registration. The upstream install.sh will prompt / document how to supply
-# them. Expect to re-run that step manually after registering.
+# them. You can rerun just the asset step manually:
+#     cd <TRACKER_DIR>; conda activate <ENV_NAME>; bash install.sh
 
 set -euo pipefail
 
@@ -35,75 +40,109 @@ if ! command -v conda >/dev/null 2>&1; then
 fi
 # shellcheck disable=SC1091
 source "$(conda info --base)/etc/profile.d/conda.sh"
+conda_base=$(conda info --base)
 
 # ---------- 2. clone ----------
 abs_tracker_dir="$repo_root/$TRACKER_DIR"
 if [ ! -d "$abs_tracker_dir" ]; then
-  echo "[1/4] Cloning metrical-tracker into $TRACKER_DIR ..."
+  echo "[1/5] Cloning metrical-tracker into $TRACKER_DIR ..."
   mkdir -p "$(dirname "$abs_tracker_dir")"
   git clone --recurse-submodules \
       https://github.com/Zielon/metrical-tracker.git \
       "$abs_tracker_dir"
 else
-  echo "[1/4] $TRACKER_DIR already exists, skipping clone."
+  echo "[1/5] $TRACKER_DIR already exists, skipping clone."
   (cd "$abs_tracker_dir" && git submodule update --init --recursive || true)
 fi
 
 # ---------- 3. conda env ----------
 if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
-  echo "[2/4] Creating conda env '$ENV_NAME' (python $PY_VERSION) ..."
+  echo "[2/5] Creating conda env '$ENV_NAME' (python $PY_VERSION) ..."
   conda create -y -n "$ENV_NAME" "python=$PY_VERSION"
 else
-  echo "[2/4] Conda env '$ENV_NAME' already exists, reusing."
+  echo "[2/5] Conda env '$ENV_NAME' already exists, reusing."
 fi
 
 conda activate "$ENV_NAME"
+env_prefix="$CONDA_PREFIX"
 
-# ---------- 4. dependencies ----------
-echo "[3/4] Installing PyTorch (+ CUDA $CUDA) and tracker requirements ..."
+# ---------- 4. pytorch + tracker pip dependencies ----------
+echo "[3/5] Installing PyTorch (+ CUDA $CUDA) ..."
 cd "$abs_tracker_dir"
 
-# Upstream pins PyTorch 1.12.1; install via conda to match CUDA cleanly.
 conda install -y \
     pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 \
     "cudatoolkit=$CUDA" \
     -c pytorch -c nvidia
 
-# Prefer the upstream install.sh if present (handles MICA assets too).
-if [ -x install.sh ]; then
-  echo "[3b] Running upstream install.sh ..."
-  bash install.sh || {
-    echo
-    echo "upstream install.sh exited non-zero. That step often fails when"
-    echo "FLAME / MICA assets have not been downloaded yet. Follow the"
-    echo "instructions printed above (register at flame.is.tue.mpg.de, place"
-    echo "the assets, rerun install.sh) and re-run this script if needed."
-    exit_code=$?
-  }
-elif [ -f requirements.txt ]; then
+# Always install the upstream pip deps. Previously we let install.sh do
+# this implicitly, but upstream's install.sh may fail partway (e.g. on
+# licence-gated asset downloads) before installing cv2/mediapipe/etc.
+echo "[4/5] Installing pip dependencies ..."
+if [ -f environment.yml ]; then
+  conda env update -n "$ENV_NAME" -f environment.yml --prune || true
+fi
+if [ -f requirements.txt ]; then
   pip install -r requirements.txt
 fi
 
-# ---------- 5. done ----------
+# Safety net: the three packages that have caused the most frequent
+# "ModuleNotFoundError" reports regardless of whether requirements.txt
+# covered them. Explicit versions match metrical-tracker's README as of
+# 2024-11; adjust if upstream changes.
+pip install --upgrade \
+    opencv-python \
+    mediapipe \
+    face-alignment \
+    pyyaml loguru trimesh chumpy \
+    || {
+  echo "warning: pip safety-net install failed; tracker may still lack deps."
+}
+
+# ---------- 5. asset download (upstream install.sh) ----------
+if [ -n "${SKIP_ASSETS:-}" ]; then
+  echo "[5/5] SKIP_ASSETS set; skipping upstream install.sh (assets)."
+elif [ -x install.sh ] || [ -f install.sh ]; then
+  echo "[5/5] Running upstream install.sh (downloads FLAME / MICA assets) ..."
+  bash install.sh || {
+    echo
+    echo "upstream install.sh exited non-zero. This usually means FLAME /"
+    echo "MICA assets require registration at https://flame.is.tue.mpg.de/"
+    echo "and a manual download. The conda env itself is already usable;"
+    echo "just rerun \`cd $TRACKER_DIR && conda activate $ENV_NAME && \\"
+    echo "bash install.sh\` after you have placed the assets."
+  }
+else
+  echo "[5/5] no install.sh in $TRACKER_DIR; skipping asset step."
+fi
+
+# ---------- 6. locations ----------
 cat <<EOM
 
-[4/4] metrical-tracker environment ready.
+================================================================================
+[done] metrical-tracker environment ready.
+
+Installed locations:
+
+  Source (cloned repo)  : $abs_tracker_dir
+  Conda env (binaries)  : $env_prefix
+  Site-packages         : $env_prefix/lib/python$PY_VERSION/site-packages
 
 Next steps:
 
-  # Activate the tracker env and run it on a FlashAvatar identity's frames.
+  bash scripts/run_tracker.sh <idname>
+
+or manually:
+
   conda activate $ENV_NAME
-  cd $TRACKER_DIR
+  cd $abs_tracker_dir
   python tracker.py \\
       --input_dir $repo_root/dataset/<idname>/raw/imgs \\
       --output_dir $repo_root/metrical-tracker/output/<idname>
 
-  # Then back in the FlashAvatar env:
-  cd $repo_root
+Then back in the FlashAvatar env:
+
   python scripts/preprocess.py finalize --idname <idname>
 
-Or use the convenience wrapper:
-
-  bash scripts/run_tracker.sh <idname>
-
+================================================================================
 EOM
