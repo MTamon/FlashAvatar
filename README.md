@@ -187,6 +187,22 @@ To train FlashAvatar on a custom face, you need:
 4. A **portrait segmentation model** (or matting model) to produce alpha
    masks
 
+#### Automated pipeline
+
+A ready-to-run end-to-end pipeline is provided in `preprocess/`:
+
+```bash
+python scripts/preprocess.py --idname myface --video my.mp4 \
+    --crop       # or --no-crop
+```
+
+It runs ffmpeg frame extraction → BiSeNet face parsing → RobustVideoMatting
+alpha → metrical-tracker (external, optional) → final square crop + resize
+to `--size` (default 512) with camera intrinsic `K` rewritten to match.
+See [docs/preprocessing.md](docs/preprocessing.md) for the full design and
+checkpoint locations. The remaining sections below describe the same steps
+performed manually.
+
 #### Step 1 — Extract video frames
 
 ```bash
