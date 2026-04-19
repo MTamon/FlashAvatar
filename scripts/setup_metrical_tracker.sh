@@ -79,9 +79,11 @@ conda install -y \
 # this implicitly, but upstream's install.sh may fail partway (e.g. on
 # licence-gated asset downloads) before installing cv2/mediapipe/etc.
 echo "[4/5] Installing pip dependencies ..."
-if [ -f environment.yml ]; then
-  conda env update -n "$ENV_NAME" -f environment.yml --prune || true
-fi
+# Note: we deliberately do NOT run `conda env update -f environment.yml`.
+# metrical-tracker's environment.yml pins its own torch / cudatoolkit /
+# python versions that collide with the conda install above, and the
+# resulting conflict solve can hang or fail. `requirements.txt` carries
+# every pure-python dependency the tracker actually needs at runtime.
 if [ -f requirements.txt ]; then
   pip install -r requirements.txt
 fi
