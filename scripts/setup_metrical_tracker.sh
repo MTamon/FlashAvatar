@@ -101,31 +101,44 @@ pip install --upgrade \
   echo "warning: pip safety-net install failed; tracker may still lack deps."
 }
 
-# chumpy needs special handling: the PyPI sdist (0.70) has a setup.py that
-# does `import pip`, which fails inside PEP 517 isolated build envs with
-# "ModuleNotFoundError: No module named 'pip'". Two known-good install
-# paths:
-#   1. `--no-build-isolation` lets chumpy's setup.py see the env's own pip
-#      (fastest, no network clone required).
-#   2. mattloper git fork, which is also what FlashAvatar's install_128.sh
-#      uses (requirements_128.txt:75) and removes the `import pip` line.
-if ! python -c "import chumpy" >/dev/null 2>&1; then
+# numpy: metrical-tracker (pytorch 1.12 / py3.9 / 2022 era) is designed
+# around numpy 1.23.x. Transitive pins in requirements.txt sometimes pull
+# in numpy 2.x, which is incompatible with chumpy 0.70 (uses removed
+# `np.bool`/`np.int`/`np.float` aliases) and with the older mediapipe /
+# face-alignment builds bundled for py3.9. Force numpy<2 before chumpy.
+if python -c "import numpy, sys; sys.exit(0 if numpy.__version__.startswith('2') else 1)" 2>/dev/null; then
+  echo "[4/5] Downgrading numpy (<2) for chumpy / mediapipe compatibility ..."
+  pip install "numpy<2"
+fi
+
+# chumpy needs special handling on two fronts:
+#   1. Build: the PyPI sdist 0.70 has a setup.py that does `import pip`,
+#      which fails inside PEP 517 isolated build envs with
+#      "ModuleNotFoundError: No module named 'pip'". `--no-build-isolation`
+#      lets setup.py see the env's own pip.
+#   2. Runtime: even after install, `import chumpy` errors if numpy>=2.0
+#      because chumpy 0.70 references removed np.bool/int/float aliases.
+#      The numpy<2 pin above handles this.
+# If both install paths fail OR import still errors, we exit 1 so the
+# user isn't misled by a "setup succeeded" message.
+chumpy_ok() { python -c "import chumpy" >/dev/null 2>&1; }
+if ! chumpy_ok; then
   echo "[4/5] Installing chumpy ..."
-  # Make sure build deps chumpy's setup.py imports are present in the
-  # env (they're already there after the pytorch install above, but be
-  # defensive in case requirements.txt didn't pull them).
   pip install --upgrade pip setuptools wheel
-  python -c "import numpy" >/dev/null 2>&1 || pip install numpy
-  if ! pip install --no-build-isolation chumpy; then
-    echo "chumpy --no-build-isolation failed; trying mattloper git fork ..."
-    if ! pip install "git+https://github.com/mattloper/chumpy.git"; then
-      echo "error: chumpy install failed by both methods. The tracker"    >&2
-      echo "cannot run without it. Re-run scripts/setup_metrical_tracker.sh" >&2
-      echo "once the network / git issue is resolved, or install manually:" >&2
-      echo "    conda activate $ENV_NAME"                                 >&2
-      echo "    pip install --no-build-isolation chumpy"                  >&2
-      exit 1
-    fi
+  python -c "import numpy" >/dev/null 2>&1 || pip install "numpy<2"
+  # `--force-reinstall` because a previous run may have left a broken
+  # chumpy 0.70 installed against numpy 2.x; plain `pip install chumpy`
+  # would then be a no-op even though import is broken.
+  pip install --no-build-isolation --force-reinstall chumpy \
+    || pip install "git+https://github.com/mattloper/chumpy.git" \
+    || true
+  if ! chumpy_ok; then
+    echo "error: chumpy is installed but 'import chumpy' still fails."       >&2
+    echo "Inspect the exact error with:"                                     >&2
+    echo "    conda activate $ENV_NAME && python -c 'import chumpy'"         >&2
+    echo "If the error mentions numpy.bool/int/float, re-run this script"    >&2
+    echo "(it force-downgrades numpy<2)."                                    >&2
+    exit 1
   fi
 fi
 
