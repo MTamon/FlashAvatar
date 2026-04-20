@@ -102,6 +102,7 @@ pip install \
     mediapipe \
     face-alignment \
     pyyaml loguru trimesh \
+    tensorboard \
     || {
   echo "warning: pip safety-net install failed; tracker may still lack deps."
 }

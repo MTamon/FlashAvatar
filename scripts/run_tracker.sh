@@ -52,7 +52,7 @@ conda activate "$ENV_NAME"
 
 # Sanity-check the env has the packages tracker.py imports.
 missing=()
-for mod in cv2 mediapipe face_alignment torch numpy pytorch3d chumpy; do
+for mod in cv2 mediapipe face_alignment torch numpy pytorch3d chumpy tensorboard; do
   if ! python -c "import $mod" >/dev/null 2>&1; then
     missing+=("$mod")
   fi
