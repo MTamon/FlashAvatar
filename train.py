@@ -38,6 +38,10 @@ if __name__ == "__main__":
     parser.add_argument('--idname', type=str, default='id1_25', help='id name')
     parser.add_argument('--image_res', type=int, default=512, help='image resolution')
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument('--ignore-keep-list', dest='ignore_keep_list',
+                        action='store_true',
+                        help='Train on every frame even if '
+                             'dataset/<idname>/raw/keep_list.txt exists.')
     args = parser.parse_args(sys.argv[1:])
     args.device = "cuda"
     lpt = lp.extract(args)
@@ -62,7 +66,9 @@ if __name__ == "__main__":
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(train_dir, exist_ok=True)
     os.makedirs(model_dir, exist_ok=True)
-    scene = Scene_mica(data_dir, mica_datadir, train_type=0, white_background=lpt.white_background, device = args.device)
+    scene = Scene_mica(data_dir, mica_datadir, train_type=0,
+                       white_background=lpt.white_background, device=args.device,
+                       use_keep_list=not args.ignore_keep_list)
     
     first_iter = 0
     gaussians = GaussianModel(lpt.sh_degree)

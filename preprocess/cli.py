@@ -278,6 +278,12 @@ def cmd_filter_blur(args: argparse.Namespace) -> int:
         print(f"[filter-blur] wrote {report['csv']}")
         if report["preview"] is not None:
             print(f"[filter-blur] wrote {report['preview']}")
+        print(
+            "[filter-blur] `train.py` / `test.py` will auto-consume this "
+            "keep_list; pass --ignore-keep-list to override. The "
+            "metrical-tracker itself still sees every frame; re-run "
+            "`filter-blur` after changing --percentile to regenerate."
+        )
     return 0
 
 

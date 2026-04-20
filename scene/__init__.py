@@ -15,13 +15,27 @@ from utils.graphics_utils import focal2fov
 
 
 class Scene_mica:
-    def __init__(self, datadir, mica_datadir, train_type, white_background, device):
+    def __init__(self, datadir, mica_datadir, train_type, white_background, device,
+                 use_keep_list=True):
         ## train_type: 0 for train, 1 for test, 2 for eval
         frame_delta = 1 # default mica-tracking starts from the second frame
         images_folder = os.path.join(datadir, "imgs")
         parsing_folder = os.path.join(datadir, "parsing")
         alpha_folder = os.path.join(datadir, "alpha")
-        
+
+        # Optional motion-blur filter: skip frames whose image stems are not
+        # listed in raw/keep_list.txt. The file is written by
+        # `preprocess filter-blur`; when absent (or use_keep_list=False) all
+        # frames are used.
+        keep_set = None
+        if use_keep_list:
+            keep_list_path = os.path.join(datadir, "raw", "keep_list.txt")
+            if os.path.isfile(keep_list_path):
+                with open(keep_list_path) as fh:
+                    keep_set = {ln.strip() for ln in fh if ln.strip()}
+                print(f"[scene] using keep_list with {len(keep_set)} frames: "
+                      f"{keep_list_path}")
+
         self.bg_image = torch.zeros((3, 512, 512))
         if white_background:
             self.bg_image[:, :, :] = 1
@@ -55,9 +69,13 @@ class Scene_mica:
             range_down = self.N_frames - eval_num
             range_up = self.N_frames
 
+        skipped = 0
         for frame_id in tqdm(range(range_down, range_up)):
             image_name_mica = str(frame_id).zfill(5) # obey mica tracking
             image_name_ori = str(frame_id+frame_delta).zfill(5)
+            if keep_set is not None and image_name_ori not in keep_set:
+                skipped += 1
+                continue
             ckpt_path = os.path.join(mica_ckpt_dir, image_name_mica+'.frame')
             payload = torch.load(ckpt_path, weights_only=False)
 
@@ -101,7 +119,17 @@ class Scene_mica:
                                 exp_param=exp_param, eyes_pose=eyes_pose, eyelids=eyelids, jaw_pose=jaw_pose,
                                 image_name=image_name_mica, uid=frame_id, data_device=device)
             self.cameras.append(camera_indiv)
-    
+
+        if keep_set is not None:
+            split = {0: "train", 1: "test", 2: "eval"}.get(train_type, str(train_type))
+            print(f"[scene] split={split}: {len(self.cameras)} kept / "
+                  f"{skipped} skipped in range [{range_down}, {range_up})")
+            if not self.cameras:
+                raise RuntimeError(
+                    f"no frames remain after keep_list filtering for "
+                    f"split={split}; lower --percentile in `preprocess "
+                    f"filter-blur`, or pass use_keep_list=False.")
+
     def getCameras(self):
         return self.cameras
 
