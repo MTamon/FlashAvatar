@@ -189,18 +189,20 @@ To train FlashAvatar on a custom face, you need:
 
 #### Automated pipeline
 
-A ready-to-run pipeline is provided in `preprocess/`, split across the
-metrical-tracker boundary so the tracker can live in its own conda env:
+A ready-to-run pipeline is provided in `preprocess/`. All three stages
+run in the same FlashAvatar env — the tracker uses the
+[MTamon/metrical-tracker@cuda128](https://github.com/MTamon/metrical-tracker/tree/cuda128)
+fork, which shares FlashAvatar's pin set (torch 2.9.1 / CUDA 12.8):
 
 ```bash
-# 1. FlashAvatar env — extract + BiSeNet parsing + RVM matting
+# 1. extract + BiSeNet parsing + RVM matting
 python scripts/preprocess.py prepare --idname myface --video my.mp4
 
-# 2. tracker env (one-time setup, then run)
+# 2. tracker (one-time setup clones the fork and grabs FLAME assets)
 bash scripts/setup_metrical_tracker.sh
 bash scripts/run_tracker.sh myface
 
-# 3. FlashAvatar env — crop/resize + K/img_size adjustment
+# 3. crop/resize + K/img_size adjustment
 python scripts/preprocess.py finalize --idname myface --crop
 ```
 

@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# Convenience wrapper: activate the metrical-tracker conda env, run the
-# tracker against `dataset/<idname>/raw/imgs/`, and stage the result at
+# Run metrical-tracker (MTamon/metrical-tracker@cuda128) against
+# `dataset/<idname>/raw/imgs/`, and stage the result at
 # `metrical-tracker/output/<idname>/checkpoint_raw/` so
 # `preprocess.py finalize` can consume it.
 #
+# The cuda128 fork shares FlashAvatar's env (torch 2.9.1 / cu128 / py3.11),
+# so this script does NOT activate a separate env — it expects to be run
+# inside the active FlashAvatar env (the one from install_128.sh).
+#
 # Usage:
+#   source .venv/bin/activate
 #   bash scripts/run_tracker.sh <idname> [extra tracker args...]
 #
 # Overridable environment variables:
 #   TRACKER_DIR   tracker install dir (default: external/metrical-tracker)
-#   ENV_NAME      conda env name      (default: tracker)
 
 set -euo pipefail
 
@@ -22,7 +26,6 @@ IDNAME=$1
 shift || true
 
 TRACKER_DIR=${TRACKER_DIR:-external/metrical-tracker}
-ENV_NAME=${ENV_NAME:-tracker}
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
@@ -42,14 +45,6 @@ if [ ! -d "$imgs_dir" ] || [ -z "$(ls -A "$imgs_dir" 2>/dev/null)" ]; then
   exit 1
 fi
 
-if ! command -v conda >/dev/null 2>&1; then
-  echo "error: conda not on PATH." >&2
-  exit 1
-fi
-# shellcheck disable=SC1091
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate "$ENV_NAME"
-
 # Sanity-check the env has the packages tracker.py imports.
 missing=()
 for mod in cv2 mediapipe face_alignment torch numpy pytorch3d chumpy tensorboard; do
@@ -58,37 +53,22 @@ for mod in cv2 mediapipe face_alignment torch numpy pytorch3d chumpy tensorboard
   fi
 done
 if [ "${#missing[@]}" -gt 0 ]; then
-  echo "error: the '$ENV_NAME' env is missing: ${missing[*]}" >&2
+  echo "error: the active python env is missing: ${missing[*]}" >&2
   echo "Repair with:" >&2
   echo "    bash scripts/setup_metrical_tracker.sh" >&2
-  echo "or manually (the install recipe differs per package):" >&2
-  for mod in "${missing[@]}"; do
-    case "$mod" in
-      chumpy)
-        echo "    conda activate $ENV_NAME && pip install --no-build-isolation chumpy" >&2
-        ;;
-      pytorch3d)
-        echo "    conda activate $ENV_NAME && pip install --no-index --no-cache-dir pytorch3d \\" >&2
-        echo "        -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py39_cu113_pyt1121/download.html" >&2
-        ;;
-      *)
-        echo "    conda activate $ENV_NAME && pip install $mod" >&2
-        ;;
-    esac
-  done
   exit 1
 fi
 
 mkdir -p "$out_dir"
 cd "$abs_tracker_dir"
 
-echo "[tracker] $imgs_dir -> $out_dir (env: $ENV_NAME)"
+echo "[tracker] $imgs_dir -> $out_dir"
 python tracker.py \
     --input_dir "$imgs_dir" \
     --output_dir "$out_dir" \
     "$@"
 
-# The upstream tracker writes to checkpoint/; rename to checkpoint_raw/ so
+# tracker writes to checkpoint/; rename to checkpoint_raw/ so
 # `preprocess finalize` treats it as the pre-crop source of truth.
 if [ -d "$out_dir/checkpoint" ] && [ ! -d "$out_dir/checkpoint_raw" ]; then
   mv "$out_dir/checkpoint" "$out_dir/checkpoint_raw"
@@ -99,7 +79,7 @@ cat <<EOM
 
 [done] tracker output at: $out_dir/checkpoint_raw/
 
-Next: back in the FlashAvatar env, run:
+Next:
 
   python scripts/preprocess.py finalize --idname $IDNAME
 

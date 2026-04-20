@@ -1,224 +1,182 @@
 #!/usr/bin/env bash
-# Set up a conda environment for metrical-tracker (the FLAME tracker used
-# by FlashAvatar). This follows the upstream instructions at
-# https://github.com/Zielon/metrical-tracker and keeps the tracker env
-# fully separate from FlashAvatar's env.
+# Install MTamon/metrical-tracker (cuda128 branch) into the ACTIVE
+# FlashAvatar env.
+#
+# The cuda128 fork shares FlashAvatar's pinned stack (Python 3.11 /
+# PyTorch 2.9.1 / CUDA 12.8 / numpy 2.2.6), so the tracker runs in the
+# same environment — no separate conda/venv needed. Run this AFTER
+# `bash install_128.sh` has set up FlashAvatar's env, and with that env
+# active.
 #
 # Usage:
+#   source .venv/bin/activate          # or your FlashAvatar env activator
 #   bash scripts/setup_metrical_tracker.sh
 #
-# The script is idempotent: re-running it repairs missing dependencies
-# (e.g. opencv-python) without re-cloning or recreating the conda env.
-#
 # Overridable environment variables:
-#   TRACKER_DIR   target dir for the clone (default: external/metrical-tracker)
-#   ENV_NAME      conda env name          (default: tracker)
-#   PY_VERSION    python version          (default: 3.9)
-#   CUDA          cudatoolkit spec         (default: 11.3)
-#   SKIP_ASSETS   if set, skip running upstream install.sh (asset download)
+#   TRACKER_REPO    git url    (default: https://github.com/MTamon/metrical-tracker.git)
+#   TRACKER_BRANCH  git branch (default: cuda128)
+#   TRACKER_DIR    clone dir  (default: external/metrical-tracker)
+#   SKIP_ASSETS    if set, skip FLAME asset download
+#   FLAME_USER     FLAME account username (prompted if unset and assets missing)
+#   FLAME_PASS     FLAME account password (prompted if unset and assets missing)
 #
-# Notes on license-gated assets (FLAME 2020 etc.):
-# metrical-tracker / MICA need assets from flame.is.tue.mpg.de that require
-# registration. The upstream install.sh will prompt / document how to supply
-# them. You can rerun just the asset step manually:
-#     cd <TRACKER_DIR>; conda activate <ENV_NAME>; bash install.sh
+# Notes on license-gated assets: the FLAME 2020 / texture / masks archives
+# are gated behind a registration at https://flame.is.tue.mpg.de/. Re-runs
+# skip the download if data/FLAME2020/generic_model.pkl already exists.
 
 set -euo pipefail
 
+TRACKER_REPO=${TRACKER_REPO:-https://github.com/MTamon/metrical-tracker.git}
+TRACKER_BRANCH=${TRACKER_BRANCH:-cuda128}
 TRACKER_DIR=${TRACKER_DIR:-external/metrical-tracker}
-ENV_NAME=${ENV_NAME:-tracker}
-PY_VERSION=${PY_VERSION:-3.9}
-CUDA=${CUDA:-11.3}
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
+abs_tracker_dir="$repo_root/$TRACKER_DIR"
 
-# ---------- 1. conda availability ----------
-if ! command -v conda >/dev/null 2>&1; then
-  echo "error: conda is not on PATH. Install Miniconda/Anaconda first." >&2
+# ---------- 1. precondition check: FlashAvatar env must be active ----------
+if ! command -v python >/dev/null 2>&1; then
+  echo "error: no 'python' on PATH. Activate FlashAvatar's env first:" >&2
+  echo "    source .venv/bin/activate   # (or: conda activate <name>)" >&2
   exit 1
 fi
-# shellcheck disable=SC1091
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda_base=$(conda info --base)
+if ! python -c "import torch" >/dev/null 2>&1; then
+  echo "error: 'torch' is not importable in the active python env." >&2
+  echo "Run FlashAvatar's install first:" >&2
+  echo "    python3.11 -m venv .venv && source .venv/bin/activate" >&2
+  echo "    bash install_128.sh" >&2
+  exit 1
+fi
+torch_ver=$(python -c "import torch; print(torch.__version__)")
+case "$torch_ver" in
+  2.9.*) ;;
+  *)
+    echo "warning: tracker (cuda128) is pinned to torch==2.9.1;" >&2
+    echo "         active env has torch $torch_ver." >&2
+    echo "         pip install -r requirements.txt may try to reinstall torch." >&2
+    ;;
+esac
 
-# ---------- 2. clone ----------
-abs_tracker_dir="$repo_root/$TRACKER_DIR"
+# ---------- 2. clone / update the fork ----------
 if [ ! -d "$abs_tracker_dir" ]; then
-  echo "[1/5] Cloning metrical-tracker into $TRACKER_DIR ..."
+  echo "[1/3] Cloning $TRACKER_REPO ($TRACKER_BRANCH) into $TRACKER_DIR ..."
   mkdir -p "$(dirname "$abs_tracker_dir")"
-  git clone --recurse-submodules \
-      https://github.com/Zielon/metrical-tracker.git \
-      "$abs_tracker_dir"
+  git clone --branch "$TRACKER_BRANCH" --recurse-submodules \
+      "$TRACKER_REPO" "$abs_tracker_dir"
 else
-  echo "[1/5] $TRACKER_DIR already exists, skipping clone."
-  (cd "$abs_tracker_dir" && git submodule update --init --recursive || true)
+  echo "[1/3] $TRACKER_DIR exists; fetching $TRACKER_BRANCH ..."
+  (
+    cd "$abs_tracker_dir"
+    git fetch origin "$TRACKER_BRANCH"
+    git checkout "$TRACKER_BRANCH"
+    git pull --ff-only origin "$TRACKER_BRANCH" || true
+    git submodule update --init --recursive || true
+  )
 fi
 
-# ---------- 3. conda env ----------
-if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
-  echo "[2/5] Creating conda env '$ENV_NAME' (python $PY_VERSION) ..."
-  conda create -y -n "$ENV_NAME" "python=$PY_VERSION"
-else
-  echo "[2/5] Conda env '$ENV_NAME' already exists, reusing."
+# ---------- 3. tracker-only pip extras ----------
+# The cuda128 fork's requirements.txt largely overlaps with FlashAvatar's
+# install_128.sh pin set (torch 2.9.1, numpy 2.2.6, nvidia-cu12-*, etc.).
+# `pip install -r` is idempotent: already-installed packages at the right
+# version are skipped, tracker-only extras (mediapipe, tensorboard,
+# trimesh, matplotlib, PyWavelets, ...) are added.
+echo "[2/3] Installing tracker deps into the active env ..."
+pip install -r "$abs_tracker_dir/requirements.txt"
+
+# chumpy is not in requirements.txt but both the tracker and FlashAvatar
+# need it. install_128.sh already installs it, but repair if missing.
+if ! python -c "import chumpy" >/dev/null 2>&1; then
+  echo "[2/3] Installing chumpy (mattloper git main; numpy 2.x compatible) ..."
+  pip install "git+https://github.com/mattloper/chumpy.git"
 fi
 
-conda activate "$ENV_NAME"
-env_prefix="$CONDA_PREFIX"
-
-# ---------- 4. pytorch + tracker pip dependencies ----------
-echo "[3/5] Installing PyTorch (+ CUDA $CUDA) ..."
-cd "$abs_tracker_dir"
-
-conda install -y \
-    pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 \
-    "cudatoolkit=$CUDA" \
-    -c pytorch -c nvidia
-
-# Always install the upstream pip deps. Previously we let install.sh do
-# this implicitly, but upstream's install.sh may fail partway (e.g. on
-# licence-gated asset downloads) before installing cv2/mediapipe/etc.
-echo "[4/5] Installing pip dependencies ..."
-# Note: we deliberately do NOT run `conda env update -f environment.yml`.
-# metrical-tracker's environment.yml pins its own torch / cudatoolkit /
-# python versions that collide with the conda install above, and the
-# resulting conflict solve can hang or fail. `requirements.txt` carries
-# every pure-python dependency the tracker actually needs at runtime.
-if [ -f requirements.txt ]; then
-  pip install -r requirements.txt
-fi
-
-# Safety net: the three packages that have caused the most frequent
-# "ModuleNotFoundError" reports regardless of whether requirements.txt
-# covered them. Explicit versions match metrical-tracker's README as of
-# 2024-11; adjust if upstream changes.
-#
-# opencv-python is pinned to <4.12: opencv>=4.12 requires numpy>=2, but
-# chumpy 0.70 only imports cleanly on numpy<1.24 (see below). Don't use
-# `--upgrade` for opencv here or pip happily grabs the numpy>=2 build.
-pip install \
-    "opencv-python<4.12" \
-    "opencv-contrib-python<4.12" \
-    mediapipe \
-    face-alignment \
-    pyyaml loguru trimesh \
-    tensorboard \
-    || {
-  echo "warning: pip safety-net install failed; tracker may still lack deps."
-}
-
-# numpy: chumpy 0.70 does `from numpy import bool, int, float, complex,
-# object, unicode, str, nan, inf` at module load time. numpy 1.20
-# deprecated these aliases and numpy 1.24 REMOVED them, so `import chumpy`
-# errors with "cannot import name 'int' from 'numpy'" on anything >=1.24.
-# metrical-tracker (2022 era) is designed around numpy 1.23.x anyway.
-# Pin to <1.24 (pip resolves this to 1.23.5 for py3.9).
-need_numpy_downgrade=0
-if python -c "import numpy" >/dev/null 2>&1; then
-  nv=$(python -c "import numpy; print(numpy.__version__)")
-  case "$nv" in
-    1.23.*) ;;  # already fine
-    *) need_numpy_downgrade=1 ;;
-  esac
-else
-  need_numpy_downgrade=1
-fi
-if [ "$need_numpy_downgrade" -eq 1 ]; then
-  echo "[4/5] Installing numpy<1.24 (required by chumpy 0.70) ..."
-  pip install "numpy<1.24"
-fi
-
-# chumpy needs special handling on two fronts:
-#   1. Build: the PyPI sdist 0.70 has a setup.py that does `import pip`,
-#      which fails inside PEP 517 isolated build envs with
-#      "ModuleNotFoundError: No module named 'pip'". `--no-build-isolation`
-#      lets setup.py see the env's own pip.
-#   2. Runtime: even after install, `import chumpy` errors if numpy>=1.24
-#      because chumpy 0.70 references removed np.bool/int/float aliases.
-#      The numpy<1.24 pin above handles this.
-# If install OR import fails we exit 1 so the user isn't misled by a
-# "setup succeeded" message.
-chumpy_ok() { python -c "import chumpy" >/dev/null 2>&1; }
-if ! chumpy_ok; then
-  echo "[4/5] Installing chumpy ..."
-  pip install --upgrade pip setuptools wheel
-  # `--force-reinstall` because a previous run may have left a broken
-  # chumpy 0.70 installed against numpy 2.x / 1.26; plain `pip install
-  # chumpy` would then be a no-op even though import is broken.
-  pip install --no-build-isolation --force-reinstall chumpy \
-    || pip install "git+https://github.com/mattloper/chumpy.git" \
-    || true
-  if ! chumpy_ok; then
-    echo "error: chumpy is installed but 'import chumpy' still fails."       >&2
-    echo "Inspect the exact error with:"                                     >&2
-    echo "    conda activate $ENV_NAME && python -c 'import chumpy'"         >&2
-    echo "If the error mentions 'cannot import name int/float/bool from"     >&2
-    echo "numpy', re-run this script (it pins numpy<1.24)."                  >&2
-    exit 1
-  fi
-fi
-
-# pytorch3d: tracker.py imports `from pytorch3d.io import load_obj`. Upstream
-# requirements.txt does NOT list pytorch3d; metrical-tracker's install.sh
-# tries to build it from source which is slow and often fails on CUDA
-# mismatch. Use Facebook's prebuilt wheel for py39 + torch 1.12.1 + cu113,
-# with a source build as a last-resort fallback.
+# pytorch3d v0.7.8 is source-built by install_128.sh against torch 2.9.1.
+# Verify it's present and compiled against the active torch.
 if ! python -c "import pytorch3d" >/dev/null 2>&1; then
-  echo "[4/5] Installing pytorch3d (prebuilt wheel for py39/torch1.12.1/cu113) ..."
-  pip install fvcore iopath
-  pip install --no-index --no-cache-dir pytorch3d \
-      -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py39_cu113_pyt1121/download.html \
-    || {
-      echo "prebuilt wheel unavailable; falling back to source build (slow)."
-      pip install "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.2" \
-        || echo "warning: pytorch3d install failed; tracker.py will error on import."
-    }
+  echo "warning: pytorch3d is not importable. It is source-built by" >&2
+  echo "         install_128.sh against torch 2.9.1 + CUDA 12.8." >&2
+  echo "         Re-run \`bash install_128.sh\` to build it." >&2
 fi
 
-# ---------- 5. asset download (upstream install.sh) ----------
+# ---------- 4. FLAME assets ----------
+asset_sentinel="$abs_tracker_dir/data/FLAME2020/generic_model.pkl"
 if [ -n "${SKIP_ASSETS:-}" ]; then
-  echo "[5/5] SKIP_ASSETS set; skipping upstream install.sh (assets)."
-elif [ -x install.sh ] || [ -f install.sh ]; then
-  echo "[5/5] Running upstream install.sh (downloads FLAME / MICA assets) ..."
-  bash install.sh || {
-    echo
-    echo "upstream install.sh exited non-zero. This usually means FLAME /"
-    echo "MICA assets require registration at https://flame.is.tue.mpg.de/"
-    echo "and a manual download. The conda env itself is already usable;"
-    echo "just rerun \`cd $TRACKER_DIR && conda activate $ENV_NAME && \\"
-    echo "bash install.sh\` after you have placed the assets."
-  }
+  echo "[3/3] SKIP_ASSETS set; skipping FLAME asset download."
+elif [ -f "$asset_sentinel" ]; then
+  echo "[3/3] FLAME assets already present at $abs_tracker_dir/data/FLAME2020/, skipping."
 else
-  echo "[5/5] no install.sh in $TRACKER_DIR; skipping asset step."
+  echo "[3/3] Downloading FLAME assets (requires https://flame.is.tue.mpg.de/ account) ..."
+  if [ -z "${FLAME_USER:-}" ]; then
+    read -p "FLAME username: " FLAME_USER
+  fi
+  if [ -z "${FLAME_PASS:-}" ]; then
+    read -rsp "FLAME password: " FLAME_PASS
+    echo
+  fi
+  # URL-encode credentials (same urle() as the fork's install.sh).
+  urle() {
+    local LANG=C i x
+    for (( i = 0; i < ${#1}; i++ )); do
+      x="${1:i:1}"
+      if [[ "${x}" == [a-zA-Z0-9.~-] ]]; then
+        printf '%s' "${x}"
+      else
+        printf '%%%02X' "'${x}"
+      fi
+    done
+    echo
+  }
+  user_enc=$(urle "$FLAME_USER")
+  pass_enc=$(urle "$FLAME_PASS")
+
+  (
+    cd "$abs_tracker_dir"
+    mkdir -p data/FLAME2020
+    wget --post-data "username=$user_enc&password=$pass_enc" \
+        'https://download.is.tue.mpg.de/download.php?domain=flame&sfile=FLAME2020.zip&resume=1' \
+        -O FLAME2020.zip --no-check-certificate --continue
+    unzip -o FLAME2020.zip -d data/FLAME2020/ && rm -f FLAME2020.zip
+    [ -f data/FLAME2020/Readme.pdf ] && \
+        mv data/FLAME2020/Readme.pdf data/FLAME2020/Readme_FLAME.pdf || true
+
+    wget --post-data "username=$user_enc&password=$pass_enc" \
+        'https://download.is.tue.mpg.de/download.php?domain=flame&resume=1&sfile=TextureSpace.zip' \
+        -O TextureSpace.zip --no-check-certificate --continue
+    unzip -o TextureSpace.zip -d data/FLAME2020/ && rm -f TextureSpace.zip
+
+    wget 'https://files.is.tue.mpg.de/tbolkart/FLAME/FLAME_masks.zip' \
+        -O FLAME_masks.zip --no-check-certificate --continue
+    unzip -o FLAME_masks.zip -d data/FLAME2020/ && rm -f FLAME_masks.zip
+
+    # Head template mesh bundle (no auth required).
+    wget -O mesh.zip 'https://keeper.mpdl.mpg.de/f/f158a430ef754edba5ec/?dl=1'
+    unzip -o mesh.zip -d data/
+    if [ -d data/mesh ]; then
+      mv data/mesh/* data/ && rmdir data/mesh
+    fi
+    rm -f mesh.zip
+  )
 fi
 
-# ---------- 6. locations ----------
 cat <<EOM
 
 ================================================================================
-[done] metrical-tracker environment ready.
+[done] metrical-tracker (cuda128) set up in the active FlashAvatar env.
 
-Installed locations:
+Source     : $abs_tracker_dir
+Python env : $(python -c "import sys; print(sys.prefix)")
 
-  Source (cloned repo)  : $abs_tracker_dir
-  Conda env (binaries)  : $env_prefix
-  Site-packages         : $env_prefix/lib/python$PY_VERSION/site-packages
-
-Next steps:
-
-  bash scripts/run_tracker.sh <idname>
+Next:
+    bash scripts/run_tracker.sh <idname>
 
 or manually:
+    cd $abs_tracker_dir
+    python tracker.py \\
+        --input_dir $repo_root/dataset/<idname>/raw/imgs \\
+        --output_dir $repo_root/metrical-tracker/output/<idname>
 
-  conda activate $ENV_NAME
-  cd $abs_tracker_dir
-  python tracker.py \\
-      --input_dir $repo_root/dataset/<idname>/raw/imgs \\
-      --output_dir $repo_root/metrical-tracker/output/<idname>
-
-Then back in the FlashAvatar env:
-
-  python scripts/preprocess.py finalize --idname <idname>
+Then:
+    python scripts/preprocess.py finalize --idname <idname>
 
 ================================================================================
 EOM

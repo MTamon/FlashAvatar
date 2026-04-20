@@ -8,31 +8,29 @@ monocular video into the four inputs `train.py` expects:
 3. `dataset/<idname>/alpha/XXXXX.jpg`
 4. `metrical-tracker/output/<idname>/checkpoint/XXXXX.frame`
 
-## Two-stage pipeline (split across the tracker boundary)
+## Three-stage pipeline (one unified env)
 
-The heavy-weight FLAME tracker (metrical-tracker) runs in its own conda
-env, so the pipeline is split into three pieces. The FlashAvatar env
-drives steps 1 and 3; the tracker env drives step 2.
+All three stages run in the **same** FlashAvatar env (Python 3.11 /
+PyTorch 2.9.1 / CUDA 12.8). We use the
+[MTamon/metrical-tracker@cuda128](https://github.com/MTamon/metrical-tracker/tree/cuda128)
+fork for the tracker; it shares FlashAvatar's pin set so no second env
+is needed.
 
 ```
 video.mp4
    │ ffmpeg
    ▼
 raw/imgs/*.jpg  ──► BiSeNet  ──► raw/parsing/*_{neckhead,mouth}.png       │
-                └► RVM       ──► raw/alpha/*.jpg                          │  1. prepare (FlashAvatar env)
+                └► RVM       ──► raw/alpha/*.jpg                          │  1. prepare
                                                                           │
-          ─────────────────── activate tracker env ────────────────────── ─
+raw/imgs/*.jpg  ──► metrical-tracker ──► checkpoint_raw/*.frame           │  2. tracker
                                                                           │
-raw/imgs/*.jpg  ──► metrical-tracker ──► checkpoint_raw/*.frame           │  2. tracker (tracker env)
-                                                                          │
-          ─────────────────── back to FlashAvatar env ─────────────────── ─
-                                                                          │
-   │ crop + resize to --size + K/img_size adjustment                      │  3. finalize (FlashAvatar env)
+   │ crop + resize to --size + K/img_size adjustment                      │  3. finalize
    ▼                                                                      │
 dataset/<id>/{imgs,parsing,alpha}/    +    checkpoint/*.frame
 ```
 
-**Coordinate-system contract**: stages 1 and 2 all run at the original
+**Coordinate-system contract**: stages 1 and 2 both run at the original
 frame resolution. Stage 3 is the only place that interprets `--crop` /
 `--no-crop`, so those upstream modules need no awareness of the flag.
 Switching the crop flag never requires rerunning the tracker.
@@ -68,23 +66,31 @@ Stage skips: `--skip-extract`, `--skip-parsing`, `--skip-matting`.
 
 ---
 
-## 2. metrical-tracker — runs in its own env
+## 2. metrical-tracker — runs in the FlashAvatar env
 
-metrical-tracker requires pytorch 1.12 / python 3.9 / CUDA 11.x, which
-conflicts with FlashAvatar's environment. Set it up once with:
+Zielon/metrical-tracker upstream pins pytorch 1.12 / python 3.9 / CUDA
+11.x, which does not support modern GPUs (e.g. RTX 5090 / Blackwell).
+We use the [MTamon/metrical-tracker@cuda128](https://github.com/MTamon/metrical-tracker/tree/cuda128)
+fork, which mirrors FlashAvatar's pin set (torch 2.9.1 / CUDA 12.8 /
+numpy 2.2.6 / Python 3.11). Because of this overlap the tracker runs in
+FlashAvatar's own `.venv` — no second env needed.
+
+Set it up once (with FlashAvatar's env active):
 
 ```bash
+source .venv/bin/activate
 bash scripts/setup_metrical_tracker.sh
 ```
 
-This clones upstream into `external/metrical-tracker/`, creates a conda
-env (default name `tracker`), installs PyTorch 1.12 + CUDA 11.3 +
-requirements, and runs the upstream `install.sh`. License-gated FLAME /
-MICA assets may need to be placed manually — follow the upstream
-instructions at https://github.com/Zielon/metrical-tracker if the
-install.sh step prompts for them.
+This clones the fork into `external/metrical-tracker/` (cuda128 branch),
+`pip install -r`s the tracker's extra deps into the active env
+(mediapipe, tensorboard, trimesh, matplotlib, ...), and downloads the
+FLAME 2020 / TextureSpace / FLAME_masks / head-template assets (prompts
+for your https://flame.is.tue.mpg.de/ credentials; skip with
+`SKIP_ASSETS=1` or `FLAME_USER=... FLAME_PASS=...`).
 
-Overridable env vars: `TRACKER_DIR`, `ENV_NAME`, `PY_VERSION`, `CUDA`.
+Overridable env vars: `TRACKER_REPO`, `TRACKER_BRANCH`, `TRACKER_DIR`,
+`SKIP_ASSETS`, `FLAME_USER`, `FLAME_PASS`.
 
 Then run the tracker on the raw frames:
 
@@ -92,14 +98,14 @@ Then run the tracker on the raw frames:
 bash scripts/run_tracker.sh myface
 ```
 
-This activates the `tracker` env, runs `python tracker.py --input_dir
-... --output_dir ...`, and renames the resulting `checkpoint/` directory
-to `checkpoint_raw/` (the convention expected by the finalize step).
+This runs `python tracker.py --input_dir ... --output_dir ...` in the
+active env and renames the resulting `checkpoint/` directory to
+`checkpoint_raw/` (the convention expected by the finalize step).
 
 Manual equivalent:
 
 ```bash
-conda activate tracker
+source .venv/bin/activate
 cd external/metrical-tracker
 python tracker.py \
     --input_dir /.../dataset/myface/raw/imgs \
@@ -158,7 +164,7 @@ switching `--crop` / `--no-crop` only requires rerunning `finalize`.
 |---|---|---|
 | BiSeNet `79999_iter.pth` | [zllrunning/face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch) (Google Drive) | `preprocess_weights/79999_iter.pth` (auto if `gdown` installed; else download manually or pass `--bisenet-weights PATH`). |
 | RVM | `torch.hub.load("PeterL1n/RobustVideoMatting", ...)` | torch hub cache. |
-| metrical-tracker / MICA / FLAME | see upstream | handled by `scripts/setup_metrical_tracker.sh` + license-gated manual steps. |
+| metrical-tracker / MICA / FLAME | [MTamon/metrical-tracker@cuda128](https://github.com/MTamon/metrical-tracker/tree/cuda128) | handled by `scripts/setup_metrical_tracker.sh`; FLAME assets are gated at https://flame.is.tue.mpg.de/. |
 
 ## K adjustment details
 
