@@ -78,7 +78,7 @@ FlashAvatar's own `.venv` — no second env needed.
 Set it up once (with FlashAvatar's env active):
 
 ```bash
-source .venv/bin/activate
+source .venv/bin/activate       # or: conda activate <envname>
 bash scripts/setup_metrical_tracker.sh
 ```
 
@@ -105,7 +105,7 @@ active env and renames the resulting `checkpoint/` directory to
 Manual equivalent:
 
 ```bash
-source .venv/bin/activate
+source .venv/bin/activate       # or: conda activate <envname>
 cd external/metrical-tracker
 python tracker.py \
     --input_dir /.../dataset/myface/raw/imgs \

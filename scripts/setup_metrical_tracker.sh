@@ -8,8 +8,9 @@
 # `bash install_128.sh` has set up FlashAvatar's env, and with that env
 # active.
 #
-# Usage:
-#   source .venv/bin/activate          # or your FlashAvatar env activator
+# Usage (activate your FlashAvatar env first — venv OR conda):
+#   source .venv/bin/activate          # if you used a venv
+#   conda activate <envname>           # or if you use conda
 #   bash scripts/setup_metrical_tracker.sh
 #
 # Overridable environment variables:
@@ -37,13 +38,13 @@ abs_tracker_dir="$repo_root/$TRACKER_DIR"
 # ---------- 1. precondition check: FlashAvatar env must be active ----------
 if ! command -v python >/dev/null 2>&1; then
   echo "error: no 'python' on PATH. Activate FlashAvatar's env first:" >&2
-  echo "    source .venv/bin/activate   # (or: conda activate <name>)" >&2
+  echo "    source .venv/bin/activate        (venv)" >&2
+  echo "    conda activate <envname>         (conda)" >&2
   exit 1
 fi
 if ! python -c "import torch" >/dev/null 2>&1; then
   echo "error: 'torch' is not importable in the active python env." >&2
-  echo "Run FlashAvatar's install first:" >&2
-  echo "    python3.11 -m venv .venv && source .venv/bin/activate" >&2
+  echo "Run FlashAvatar's install first (venv or conda; either is fine):" >&2
   echo "    bash install_128.sh" >&2
   exit 1
 fi
@@ -64,9 +65,17 @@ if [ ! -d "$abs_tracker_dir" ]; then
   git clone --branch "$TRACKER_BRANCH" --recurse-submodules \
       "$TRACKER_REPO" "$abs_tracker_dir"
 else
-  echo "[1/3] $TRACKER_DIR exists; fetching $TRACKER_BRANCH ..."
+  echo "[1/3] $TRACKER_DIR exists; updating to $TRACKER_BRANCH ..."
   (
     cd "$abs_tracker_dir"
+    # Migration path: earlier revisions of this script cloned Zielon's
+    # upstream, which has no cuda128 branch. If origin still points there
+    # (or anywhere other than $TRACKER_REPO), rewrite it so fetch works.
+    current_url=$(git remote get-url origin 2>/dev/null || echo "")
+    if [ "$current_url" != "$TRACKER_REPO" ]; then
+      echo "    rewriting origin: $current_url -> $TRACKER_REPO"
+      git remote set-url origin "$TRACKER_REPO"
+    fi
     git fetch origin "$TRACKER_BRANCH"
     git checkout "$TRACKER_BRANCH"
     git pull --ff-only origin "$TRACKER_BRANCH" || true
