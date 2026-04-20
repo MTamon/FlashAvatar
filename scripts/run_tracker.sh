@@ -106,11 +106,17 @@ if [ ! -f "$stage_dir/identity.npy" ]; then
     exit 1
   fi
 
-  first_frame=$(ls "$imgs_dir" | sort | head -n 1)
-  if [ -z "$first_frame" ]; then
+  # Pick the lexically first frame. A plain `ls | sort | head` pipeline
+  # would trigger SIGPIPE on `ls` / `sort` once `head` closes after one
+  # line — combined with `set -o pipefail`, the whole script would die
+  # with exit 141 on large image dirs. Use a bash array of the glob
+  # expansion instead (already lexically sorted).
+  frames=("$imgs_dir"/*)
+  if [ ${#frames[@]} -eq 0 ] || [ ! -e "${frames[0]}" ]; then
     echo "error: no frames in $imgs_dir." >&2
     exit 1
   fi
+  first_frame=$(basename "${frames[0]}")
   mica_work="$stage_dir/_mica"
   rm -rf "$mica_work"
   mkdir -p "$mica_work/input"
