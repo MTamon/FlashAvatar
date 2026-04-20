@@ -92,8 +92,13 @@ fi
 # "ModuleNotFoundError" reports regardless of whether requirements.txt
 # covered them. Explicit versions match metrical-tracker's README as of
 # 2024-11; adjust if upstream changes.
-pip install --upgrade \
-    opencv-python \
+#
+# opencv-python is pinned to <4.12: opencv>=4.12 requires numpy>=2, but
+# chumpy 0.70 only imports cleanly on numpy<1.24 (see below). Don't use
+# `--upgrade` for opencv here or pip happily grabs the numpy>=2 build.
+pip install \
+    "opencv-python<4.12" \
+    "opencv-contrib-python<4.12" \
     mediapipe \
     face-alignment \
     pyyaml loguru trimesh \
@@ -101,14 +106,25 @@ pip install --upgrade \
   echo "warning: pip safety-net install failed; tracker may still lack deps."
 }
 
-# numpy: metrical-tracker (pytorch 1.12 / py3.9 / 2022 era) is designed
-# around numpy 1.23.x. Transitive pins in requirements.txt sometimes pull
-# in numpy 2.x, which is incompatible with chumpy 0.70 (uses removed
-# `np.bool`/`np.int`/`np.float` aliases) and with the older mediapipe /
-# face-alignment builds bundled for py3.9. Force numpy<2 before chumpy.
-if python -c "import numpy, sys; sys.exit(0 if numpy.__version__.startswith('2') else 1)" 2>/dev/null; then
-  echo "[4/5] Downgrading numpy (<2) for chumpy / mediapipe compatibility ..."
-  pip install "numpy<2"
+# numpy: chumpy 0.70 does `from numpy import bool, int, float, complex,
+# object, unicode, str, nan, inf` at module load time. numpy 1.20
+# deprecated these aliases and numpy 1.24 REMOVED them, so `import chumpy`
+# errors with "cannot import name 'int' from 'numpy'" on anything >=1.24.
+# metrical-tracker (2022 era) is designed around numpy 1.23.x anyway.
+# Pin to <1.24 (pip resolves this to 1.23.5 for py3.9).
+need_numpy_downgrade=0
+if python -c "import numpy" >/dev/null 2>&1; then
+  nv=$(python -c "import numpy; print(numpy.__version__)")
+  case "$nv" in
+    1.23.*) ;;  # already fine
+    *) need_numpy_downgrade=1 ;;
+  esac
+else
+  need_numpy_downgrade=1
+fi
+if [ "$need_numpy_downgrade" -eq 1 ]; then
+  echo "[4/5] Installing numpy<1.24 (required by chumpy 0.70) ..."
+  pip install "numpy<1.24"
 fi
 
 # chumpy needs special handling on two fronts:
@@ -116,19 +132,18 @@ fi
 #      which fails inside PEP 517 isolated build envs with
 #      "ModuleNotFoundError: No module named 'pip'". `--no-build-isolation`
 #      lets setup.py see the env's own pip.
-#   2. Runtime: even after install, `import chumpy` errors if numpy>=2.0
+#   2. Runtime: even after install, `import chumpy` errors if numpy>=1.24
 #      because chumpy 0.70 references removed np.bool/int/float aliases.
-#      The numpy<2 pin above handles this.
-# If both install paths fail OR import still errors, we exit 1 so the
-# user isn't misled by a "setup succeeded" message.
+#      The numpy<1.24 pin above handles this.
+# If install OR import fails we exit 1 so the user isn't misled by a
+# "setup succeeded" message.
 chumpy_ok() { python -c "import chumpy" >/dev/null 2>&1; }
 if ! chumpy_ok; then
   echo "[4/5] Installing chumpy ..."
   pip install --upgrade pip setuptools wheel
-  python -c "import numpy" >/dev/null 2>&1 || pip install "numpy<2"
   # `--force-reinstall` because a previous run may have left a broken
-  # chumpy 0.70 installed against numpy 2.x; plain `pip install chumpy`
-  # would then be a no-op even though import is broken.
+  # chumpy 0.70 installed against numpy 2.x / 1.26; plain `pip install
+  # chumpy` would then be a no-op even though import is broken.
   pip install --no-build-isolation --force-reinstall chumpy \
     || pip install "git+https://github.com/mattloper/chumpy.git" \
     || true
@@ -136,8 +151,8 @@ if ! chumpy_ok; then
     echo "error: chumpy is installed but 'import chumpy' still fails."       >&2
     echo "Inspect the exact error with:"                                     >&2
     echo "    conda activate $ENV_NAME && python -c 'import chumpy'"         >&2
-    echo "If the error mentions numpy.bool/int/float, re-run this script"    >&2
-    echo "(it force-downgrades numpy<2)."                                    >&2
+    echo "If the error mentions 'cannot import name int/float/bool from"     >&2
+    echo "numpy', re-run this script (it pins numpy<1.24)."                  >&2
     exit 1
   fi
 fi
