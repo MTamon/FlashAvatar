@@ -23,6 +23,8 @@ video.mp4
 raw/imgs/*.jpg  ──► BiSeNet  ──► raw/parsing/*_{neckhead,mouth}.png       │
                 └► RVM       ──► raw/alpha/*.jpg                          │  1. prepare
                                                                           │
+raw/imgs/*.jpg  ──► Laplacian-var ──► raw/keep_list.txt  (optional)       │  1a. filter-blur
+                                                                          │
 raw/imgs/*.jpg  ──► metrical-tracker ──► checkpoint_raw/*.frame           │  2. tracker
                                                                           │
    │ crop + resize to --size + K/img_size adjustment                      │  3. finalize
@@ -63,6 +65,85 @@ Stage skips: `--skip-extract`, `--skip-parsing`, `--skip-matting`.
 | extract | `ffmpeg` on PATH | — |
 | parsing | BiSeNet (vendored under `preprocess/models/bisenet.py`, [face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch) MIT) | checkpoint `79999_iter.pth` auto-downloaded via `gdown` if installed; pass `--bisenet-weights PATH` to use a manual copy. |
 | matting | [RobustVideoMatting](https://github.com/PeterL1n/RobustVideoMatting) | fetched via `torch.hub.load` on first run (needs internet). `--rvm-variant mobilenetv3\|resnet50`. |
+
+---
+
+## 1a. `preprocess.py filter-blur` — optional motion-blur rejection
+
+Head-mount / hand-held / fast-speech footage often contains motion-blurred
+frames whose FLAME tracking is noisy and whose photometric loss destabilises
+Gaussian training. This stage scores every raw frame by the variance of the
+discrete Laplacian (Pech-Pacheco 2000) measured over the `*_neckhead.png`
+face region, and writes a keep list of sharp frames.
+
+```bash
+python scripts/preprocess.py filter-blur --idname myface
+# default: drop the bottom 15th percentile of frames by face-region variance
+```
+
+Outputs (under `dataset/<idname>/raw/`):
+
+```
+raw/keep_list.txt      # one 5-digit stem per kept frame (e.g. 00001)
+raw/blur_scores.csv    # frame,laplacian_variance,face_pixels,kept
+raw/blur_preview.jpg   # montage of the N blurriest dropped frames
+```
+
+Key options:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--percentile` | `15.0` | Drop the bottom N% by variance. |
+| `--absolute-threshold` | — | Use an absolute variance cutoff instead of a percentile. |
+| `--face-mask` / `--no-face-mask` | `--face-mask` | Restrict the variance measurement to the neck/head parsing mask. Falls back to whole-frame when `raw/parsing/` is missing. |
+| `--preview-count` | `12` | Number of worst frames shown in `blur_preview.jpg` (0 to skip). |
+| `--dry-run` | off | Report counts only; no files written. |
+
+The stage is **opt-in and non-destructive**: `raw/imgs/` is never modified,
+no downstream stage is auto-rerun, and skipping this stage entirely is the
+same as keeping every frame.
+
+### Downstream consumption
+
+`raw/keep_list.txt`, when present, changes the behaviour of `Scene_mica` and
+therefore of `train.py` / `test.py`. The defaults differ on purpose:
+
+| Script | Default keep-list behaviour | Override |
+|---|---|---|
+| `train.py` | **Enabled** — blurry frames skipped | `--ignore-keep-list` |
+| `test.py` | **Disabled** — every frame rendered | `--use-keep-list` |
+
+Training on only sharp frames is the point of the filter; the test video, by
+contrast, is most useful when it renders the full sequence so you can see
+how the model handles motion-blurred poses it never saw as training GT.
+
+The **metrical-tracker itself always sees every frame** (`run_tracker.sh`
+does not consume `keep_list.txt`). Two reasons:
+
+1. `test.py` needs a FLAME fit for every frame so the rendered video can
+   include motion-blurred poses the model never saw as training GT.
+2. Filtering the tracker input would shift its internal 0-indexed `.frame`
+   numbering and break the `Scene_mica` mapping to `raw/imgs/` (which is
+   1-indexed).
+
+Because `Scene_mica` simply ignores rejected frames' FLAME fits, leaving
+them in the tracker output has no effect on training.
+
+### Recommended placement in the pipeline
+
+Run `filter-blur` after `prepare` (which produces the parsing masks that
+the face-region variance is measured over). It does not have to be rerun
+when flipping `--crop` / `--no-crop` in `finalize`, because the keep list
+is keyed on frame stems rather than pixel content.
+
+```bash
+python scripts/preprocess.py prepare     --idname myface --video in.mp4
+python scripts/preprocess.py filter-blur --idname myface    # optional
+bash   scripts/run_tracker.sh            myface
+python scripts/preprocess.py finalize    --idname myface
+python train.py --idname myface                              # keep-list ON
+python test.py  --idname myface                              # keep-list OFF
+```
 
 ---
 

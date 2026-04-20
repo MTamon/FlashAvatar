@@ -37,10 +37,13 @@ if __name__ == "__main__":
     parser.add_argument('--logname', type=str, default='log', help='log name')
     parser.add_argument('--image_res', type=int, default=512, help='image resolution')
     parser.add_argument("--checkpoint", type=str, default = None)
-    parser.add_argument('--ignore-keep-list', dest='ignore_keep_list',
+    parser.add_argument('--use-keep-list', dest='use_keep_list',
                         action='store_true',
-                        help='Render every frame even if '
-                             'dataset/<idname>/raw/keep_list.txt exists.')
+                        help='Restrict the test video to frames in '
+                             'dataset/<idname>/raw/keep_list.txt. By default '
+                             'test.py renders every frame (including ones '
+                             'excluded from training) so the video shows how '
+                             'the model handles motion-blurred poses.')
     args = parser.parse_args(sys.argv[1:])
     args.device = "cuda"
     lpt = lp.extract(args)
@@ -61,7 +64,7 @@ if __name__ == "__main__":
     logdir = data_dir+'/'+args.logname
     scene = Scene_mica(data_dir, mica_datadir, train_type=1,
                        white_background=lpt.white_background, device=args.device,
-                       use_keep_list=not args.ignore_keep_list)
+                       use_keep_list=args.use_keep_list)
     
     first_iter = 0
     gaussians = GaussianModel(lpt.sh_degree)
