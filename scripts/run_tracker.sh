@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Run metrical-tracker (MTamon/metrical-tracker@cuda128) against
+# Run metrical-tracker (MTamon/metrical-tracker@claude0420) against
 # `dataset/<idname>/raw/imgs/`, and stage the result at
 # `metrical-tracker/output/<idname>/checkpoint_raw/` so
 # `preprocess.py finalize` can consume it.
 #
-# The cuda128 fork shares FlashAvatar's env (torch 2.9.1 / cu128 / py3.11),
-# so this script does NOT activate a separate env — it expects to be run
-# inside the active FlashAvatar env (the one from install_128.sh).
+# The claude0420 fork shares FlashAvatar's env (torch 2.9.1 / cu128 /
+# py3.11), so this script does NOT activate a separate env — it expects
+# to be run inside the active FlashAvatar env (from install_128.sh).
 #
 # Usage:
 #   source .venv/bin/activate
@@ -157,6 +157,12 @@ optimize_shape: true
 optimize_jaw: true
 begin_frames: 1
 keyframes: [ 0, 1 ]
+# Speed flags added in MTamon/metrical-tracker@claude0420. These match
+# the config.py defaults; kept explicit so the profile is visible here
+# and easy to tune per run.
+opt_cache_albedos: true
+opt_rot_transpose: true
+opt_log_every: 10
 YAML
 
 echo "[tracker] $imgs_dir -> $out_dir"

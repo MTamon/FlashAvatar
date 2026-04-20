@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install MTamon/metrical-tracker (cuda128) and MTamon/MICA into the
+# Install MTamon/metrical-tracker (claude0420) and MTamon/MICA into the
 # ACTIVE FlashAvatar env.
 #
 # Both forks share FlashAvatar's pinned stack (Python 3.11 / PyTorch
@@ -15,7 +15,7 @@
 #
 # Overridable environment variables:
 #   TRACKER_REPO    git url    (default: https://github.com/MTamon/metrical-tracker.git)
-#   TRACKER_BRANCH  git branch (default: cuda128)
+#   TRACKER_BRANCH  git branch (default: claude0420)
 #   TRACKER_DIR     clone dir  (default: external/metrical-tracker)
 #   MICA_REPO       git url    (default: https://github.com/MTamon/MICA.git)
 #   MICA_BRANCH     git branch (default: claude/cuda128-pytorch29-update-ZxnsN)
@@ -33,7 +33,7 @@
 set -euo pipefail
 
 TRACKER_REPO=${TRACKER_REPO:-https://github.com/MTamon/metrical-tracker.git}
-TRACKER_BRANCH=${TRACKER_BRANCH:-cuda128}
+TRACKER_BRANCH=${TRACKER_BRANCH:-claude0420}
 TRACKER_DIR=${TRACKER_DIR:-external/metrical-tracker}
 MICA_REPO=${MICA_REPO:-https://github.com/MTamon/MICA.git}
 MICA_BRANCH=${MICA_BRANCH:-cuda128}
@@ -61,7 +61,7 @@ torch_ver=$(python -c "import torch; print(torch.__version__)")
 case "$torch_ver" in
   2.9.*) ;;
   *)
-    echo "warning: tracker (cuda128) is pinned to torch==2.9.1;" >&2
+    echo "warning: tracker (claude0420) is pinned to torch==2.9.1;" >&2
     echo "         active env has torch $torch_ver." >&2
     echo "         pip install -r requirements.txt may try to reinstall torch." >&2
     ;;
@@ -78,8 +78,10 @@ else
   (
     cd "$abs_tracker_dir"
     # Migration path: earlier revisions of this script cloned Zielon's
-    # upstream, which has no cuda128 branch. If origin still points there
-    # (or anywhere other than $TRACKER_REPO), rewrite it so fetch works.
+    # upstream (which has no cuda128 or claude0420 branch) or the
+    # previous cuda128 branch of this fork. If origin still points
+    # elsewhere, rewrite it so fetch works. The git checkout below then
+    # switches branches even if we were previously on cuda128.
     current_url=$(git remote get-url origin 2>/dev/null || echo "")
     if [ "$current_url" != "$TRACKER_REPO" ]; then
       echo "    rewriting origin: $current_url -> $TRACKER_REPO"
@@ -93,7 +95,7 @@ else
 fi
 
 # ---------- 3. tracker-only pip extras ----------
-# The cuda128 fork's requirements.txt largely overlaps with FlashAvatar's
+# The fork's requirements.txt largely overlaps with FlashAvatar's
 # install_128.sh pin set (torch 2.9.1, numpy 2.2.6, nvidia-cu12-*, etc.).
 # `pip install -r` is idempotent: already-installed packages at the right
 # version are skipped, tracker-only extras (mediapipe, tensorboard,
@@ -339,7 +341,7 @@ fi
 cat <<EOM
 
 ================================================================================
-[done] metrical-tracker (cuda128) + MICA set up in the active FlashAvatar env.
+[done] metrical-tracker (claude0420) + MICA set up in the active FlashAvatar env.
 
 Tracker    : $abs_tracker_dir
 MICA       : $abs_mica_dir

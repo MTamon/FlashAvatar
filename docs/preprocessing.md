@@ -12,7 +12,7 @@ monocular video into the four inputs `train.py` expects:
 
 All three stages run in the **same** FlashAvatar env (Python 3.11 /
 PyTorch 2.9.1 / CUDA 12.8). We use the
-[MTamon/metrical-tracker@cuda128](https://github.com/MTamon/metrical-tracker/tree/cuda128)
+[MTamon/metrical-tracker@claude0420](https://github.com/MTamon/metrical-tracker/tree/claude0420)
 fork for the tracker; it shares FlashAvatar's pin set so no second env
 is needed.
 
@@ -70,7 +70,7 @@ Stage skips: `--skip-extract`, `--skip-parsing`, `--skip-matting`.
 
 Zielon/metrical-tracker upstream pins pytorch 1.12 / python 3.9 / CUDA
 11.x, which does not support modern GPUs (e.g. RTX 5090 / Blackwell).
-We use the [MTamon/metrical-tracker@cuda128](https://github.com/MTamon/metrical-tracker/tree/cuda128)
+We use the [MTamon/metrical-tracker@claude0420](https://github.com/MTamon/metrical-tracker/tree/claude0420)
 fork, which mirrors FlashAvatar's pin set (torch 2.9.1 / CUDA 12.8 /
 numpy 2.2.6 / Python 3.11). The tracker needs a 300-dim FLAME shape
 code (`identity.npy`) per actor, produced by
@@ -87,7 +87,7 @@ bash scripts/setup_metrical_tracker.sh
 
 This:
 
-1. Clones `MTamon/metrical-tracker@cuda128` into
+1. Clones `MTamon/metrical-tracker@claude0420` into
    `external/metrical-tracker/` and pip-installs its extras (mediapipe,
    tensorboard, trimesh, matplotlib, ...) into the active env.
 2. Downloads the FLAME 2020 / TextureSpace / FLAME_masks / head-template
@@ -196,7 +196,7 @@ switching `--crop` / `--no-crop` only requires rerunning `finalize`.
 |---|---|---|
 | BiSeNet `79999_iter.pth` | [zllrunning/face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch) (Google Drive) | `preprocess_weights/79999_iter.pth` (auto if `gdown` installed; else download manually or pass `--bisenet-weights PATH`). |
 | RVM | `torch.hub.load("PeterL1n/RobustVideoMatting", ...)` | torch hub cache. |
-| metrical-tracker / FLAME | [MTamon/metrical-tracker@cuda128](https://github.com/MTamon/metrical-tracker/tree/cuda128) | handled by `scripts/setup_metrical_tracker.sh`; FLAME assets are gated at https://flame.is.tue.mpg.de/. |
+| metrical-tracker / FLAME | [MTamon/metrical-tracker@claude0420](https://github.com/MTamon/metrical-tracker/tree/claude0420) | handled by `scripts/setup_metrical_tracker.sh`; FLAME assets are gated at https://flame.is.tue.mpg.de/. |
 | MICA (`mica.tar`) | [MTamon/MICA@claude/cuda128-pytorch29-update-ZxnsN](https://github.com/MTamon/MICA/tree/claude/cuda128-pytorch29-update-ZxnsN) | downloaded to `external/MICA/data/pretrained/mica.tar` via `gdown` (same script). |
 | insightface `antelopev2`, `buffalo_l` | Google Drive (see MICA fork's `install.sh`) | downloaded to `~/.insightface/models/` via `gdown` (same script). |
 
