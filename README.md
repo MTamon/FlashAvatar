@@ -192,15 +192,18 @@ To train FlashAvatar on a custom face, you need:
 A ready-to-run pipeline is provided in `preprocess/`. All three stages
 run in the same FlashAvatar env — the tracker uses the
 [MTamon/metrical-tracker@cuda128](https://github.com/MTamon/metrical-tracker/tree/cuda128)
-fork, which shares FlashAvatar's pin set (torch 2.9.1 / CUDA 12.8):
+fork (FLAME pose/expression tracker) and the
+[MTamon/MICA@claude/cuda128-pytorch29-update-ZxnsN](https://github.com/MTamon/MICA/tree/claude/cuda128-pytorch29-update-ZxnsN)
+fork (FLAME shape predictor — produces `identity.npy`). Both share
+FlashAvatar's pin set (torch 2.9.1 / CUDA 12.8):
 
 ```bash
 # 1. extract + BiSeNet parsing + RVM matting
 python scripts/preprocess.py prepare --idname myface --video my.mp4
 
-# 2. tracker (one-time setup clones the fork and grabs FLAME assets)
+# 2. tracker (one-time setup clones tracker + MICA and grabs FLAME / MICA assets)
 bash scripts/setup_metrical_tracker.sh
-bash scripts/run_tracker.sh myface
+bash scripts/run_tracker.sh myface   # auto-runs MICA if identity.npy missing
 
 # 3. crop/resize + K/img_size adjustment
 python scripts/preprocess.py finalize --idname myface --crop

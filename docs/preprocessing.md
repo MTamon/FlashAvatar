@@ -66,14 +66,17 @@ Stage skips: `--skip-extract`, `--skip-parsing`, `--skip-matting`.
 
 ---
 
-## 2. metrical-tracker — runs in the FlashAvatar env
+## 2. metrical-tracker (+ MICA) — runs in the FlashAvatar env
 
 Zielon/metrical-tracker upstream pins pytorch 1.12 / python 3.9 / CUDA
 11.x, which does not support modern GPUs (e.g. RTX 5090 / Blackwell).
 We use the [MTamon/metrical-tracker@cuda128](https://github.com/MTamon/metrical-tracker/tree/cuda128)
 fork, which mirrors FlashAvatar's pin set (torch 2.9.1 / CUDA 12.8 /
-numpy 2.2.6 / Python 3.11). Because of this overlap the tracker runs in
-FlashAvatar's own `.venv` — no second env needed.
+numpy 2.2.6 / Python 3.11). The tracker needs a 300-dim FLAME shape
+code (`identity.npy`) per actor, produced by
+[MICA](https://github.com/Zielon/MICA); we use the pin-aligned
+[MTamon/MICA@claude/cuda128-pytorch29-update-ZxnsN](https://github.com/MTamon/MICA/tree/claude/cuda128-pytorch29-update-ZxnsN)
+fork. Both forks run in FlashAvatar's own env — no second env needed.
 
 Set it up once (with FlashAvatar's env active):
 
@@ -82,15 +85,27 @@ source .venv/bin/activate       # or: conda activate <envname>
 bash scripts/setup_metrical_tracker.sh
 ```
 
-This clones the fork into `external/metrical-tracker/` (cuda128 branch),
-`pip install -r`s the tracker's extra deps into the active env
-(mediapipe, tensorboard, trimesh, matplotlib, ...), and downloads the
-FLAME 2020 / TextureSpace / FLAME_masks / head-template assets (prompts
-for your https://flame.is.tue.mpg.de/ credentials; skip with
-`SKIP_ASSETS=1` or `FLAME_USER=... FLAME_PASS=...`).
+This:
+
+1. Clones `MTamon/metrical-tracker@cuda128` into
+   `external/metrical-tracker/` and pip-installs its extras (mediapipe,
+   tensorboard, trimesh, matplotlib, ...) into the active env.
+2. Downloads the FLAME 2020 / TextureSpace / FLAME_masks / head-template
+   assets into `external/metrical-tracker/data/` (prompts for your
+   https://flame.is.tue.mpg.de/ credentials; skip with
+   `SKIP_ASSETS=1` or set `FLAME_USER=... FLAME_PASS=...`).
+3. Clones `MTamon/MICA@claude/cuda128-pytorch29-update-ZxnsN` into
+   `external/MICA/` and pip-installs MICA's extras (insightface 0.7.3,
+   onnx, onnxruntime-gpu, gdown).
+4. Symlinks `external/MICA/data/FLAME2020` → the tracker's FLAME2020
+   (single source of truth; no second download).
+5. Downloads MICA's `mica.tar` checkpoint and insightface's
+   `antelopev2` / `buffalo_l` packs (to `~/.insightface/models/`) via
+   `gdown`.
 
 Overridable env vars: `TRACKER_REPO`, `TRACKER_BRANCH`, `TRACKER_DIR`,
-`SKIP_ASSETS`, `FLAME_USER`, `FLAME_PASS`.
+`MICA_REPO`, `MICA_BRANCH`, `MICA_DIR`, `SKIP_ASSETS`, `FLAME_USER`,
+`FLAME_PASS`.
 
 Then run the tracker on the raw frames:
 
@@ -98,18 +113,35 @@ Then run the tracker on the raw frames:
 bash scripts/run_tracker.sh myface
 ```
 
-This runs `python tracker.py --input_dir ... --output_dir ...` in the
-active env and renames the resulting `checkpoint/` directory to
-`checkpoint_raw/` (the convention expected by the finalize step).
+This:
+
+1. Stages `dataset/myface/raw/imgs/` as the actor's `source/` inside the
+   tracker tree via symlink.
+2. If `identity.npy` is missing for the actor, runs MICA on the first
+   frame and writes `identity.npy` next to `source/`. (Skipped on
+   re-runs, so you can hand-provide a better identity if MICA fails to
+   detect a face.)
+3. Auto-generates `configs/actors/<idname>.yml` and invokes
+   `python tracker.py --cfg <yml>`.
+4. Renames the resulting `checkpoint/` directory to `checkpoint_raw/`
+   (the convention expected by the finalize step).
 
 Manual equivalent:
 
 ```bash
 source .venv/bin/activate       # or: conda activate <envname>
-cd external/metrical-tracker
-python tracker.py \
-    --input_dir /.../dataset/myface/raw/imgs \
-    --output_dir /.../metrical-tracker/output/myface
+
+# (1) identity.npy: run MICA on the first frame.
+cd external/MICA
+python demo.py \
+    -i /tmp/mica_in  -o /tmp/mica_out  -a /tmp/mica_arc \
+    -m data/pretrained/mica.tar
+cp /tmp/mica_out/<first-frame-stem>/identity.npy \
+   ../metrical-tracker/input/myface/identity.npy
+
+# (2) tracker: write configs/actors/myface.yml, then:
+cd ../metrical-tracker
+python tracker.py --cfg configs/actors/myface.yml
 # then mv .../output/myface/checkpoint .../output/myface/checkpoint_raw
 ```
 
@@ -164,7 +196,9 @@ switching `--crop` / `--no-crop` only requires rerunning `finalize`.
 |---|---|---|
 | BiSeNet `79999_iter.pth` | [zllrunning/face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch) (Google Drive) | `preprocess_weights/79999_iter.pth` (auto if `gdown` installed; else download manually or pass `--bisenet-weights PATH`). |
 | RVM | `torch.hub.load("PeterL1n/RobustVideoMatting", ...)` | torch hub cache. |
-| metrical-tracker / MICA / FLAME | [MTamon/metrical-tracker@cuda128](https://github.com/MTamon/metrical-tracker/tree/cuda128) | handled by `scripts/setup_metrical_tracker.sh`; FLAME assets are gated at https://flame.is.tue.mpg.de/. |
+| metrical-tracker / FLAME | [MTamon/metrical-tracker@cuda128](https://github.com/MTamon/metrical-tracker/tree/cuda128) | handled by `scripts/setup_metrical_tracker.sh`; FLAME assets are gated at https://flame.is.tue.mpg.de/. |
+| MICA (`mica.tar`) | [MTamon/MICA@claude/cuda128-pytorch29-update-ZxnsN](https://github.com/MTamon/MICA/tree/claude/cuda128-pytorch29-update-ZxnsN) | downloaded to `external/MICA/data/pretrained/mica.tar` via `gdown` (same script). |
+| insightface `antelopev2`, `buffalo_l` | Google Drive (see MICA fork's `install.sh`) | downloaded to `~/.insightface/models/` via `gdown` (same script). |
 
 ## K adjustment details
 

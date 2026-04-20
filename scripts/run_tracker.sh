@@ -12,8 +12,13 @@
 #   source .venv/bin/activate
 #   bash scripts/run_tracker.sh <idname> [extra tracker args...]
 #
+# If <actor>/identity.npy is missing, MICA is invoked on the first frame
+# to generate it (a 300-dim FLAME shape code). Requires that MICA has
+# been set up via `scripts/setup_metrical_tracker.sh`.
+#
 # Overridable environment variables:
 #   TRACKER_DIR   tracker install dir (default: external/metrical-tracker)
+#   MICA_DIR      MICA install dir    (default: external/MICA)
 
 set -euo pipefail
 
@@ -26,10 +31,12 @@ IDNAME=$1
 shift || true
 
 TRACKER_DIR=${TRACKER_DIR:-external/metrical-tracker}
+MICA_DIR=${MICA_DIR:-external/MICA}
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 abs_tracker_dir="$repo_root/$TRACKER_DIR"
+abs_mica_dir="$repo_root/$MICA_DIR"
 
 if [ ! -d "$abs_tracker_dir" ]; then
   echo "error: $abs_tracker_dir not found. Run scripts/setup_metrical_tracker.sh first." >&2
@@ -84,6 +91,53 @@ fi
 stage_dir="$abs_tracker_dir/input/$IDNAME"
 mkdir -p "$stage_dir"
 ln -sfn "$imgs_dir" "$stage_dir/source"
+
+# tracker.py needs <actor>/identity.npy (a 300-dim FLAME shape code from
+# MICA). Generate it from the first frame on demand. Skip if already
+# present so re-runs are fast and allow hand-provided identities.
+if [ ! -f "$stage_dir/identity.npy" ]; then
+  if [ ! -d "$abs_mica_dir" ]; then
+    echo "error: $abs_mica_dir not found. Run scripts/setup_metrical_tracker.sh first." >&2
+    exit 1
+  fi
+  if [ ! -f "$abs_mica_dir/data/pretrained/mica.tar" ]; then
+    echo "error: MICA checkpoint missing at $abs_mica_dir/data/pretrained/mica.tar." >&2
+    echo "Re-run scripts/setup_metrical_tracker.sh (or unset SKIP_ASSETS)." >&2
+    exit 1
+  fi
+
+  first_frame=$(ls "$imgs_dir" | sort | head -n 1)
+  if [ -z "$first_frame" ]; then
+    echo "error: no frames in $imgs_dir." >&2
+    exit 1
+  fi
+  mica_work="$stage_dir/_mica"
+  rm -rf "$mica_work"
+  mkdir -p "$mica_work/input"
+  cp "$imgs_dir/$first_frame" "$mica_work/input/"
+
+  echo "[mica] running MICA on $first_frame to generate identity.npy ..."
+  (
+    cd "$abs_mica_dir"
+    python demo.py \
+        -i "$mica_work/input" \
+        -o "$mica_work/output" \
+        -a "$mica_work/arcface" \
+        -m data/pretrained/mica.tar
+  )
+
+  frame_stem="${first_frame%.*}"
+  identity_src="$mica_work/output/$frame_stem/identity.npy"
+  if [ ! -f "$identity_src" ]; then
+    echo "error: MICA did not produce $identity_src (face not detected?)." >&2
+    echo "Try a different first frame, or place identity.npy manually at:" >&2
+    echo "    $stage_dir/identity.npy" >&2
+    exit 1
+  fi
+  cp "$identity_src" "$stage_dir/identity.npy"
+  rm -rf "$mica_work"
+  echo "[mica] wrote $stage_dir/identity.npy"
+fi
 
 cfg_file="$abs_tracker_dir/configs/actors/${IDNAME}.yml"
 mkdir -p "$(dirname "$cfg_file")"
