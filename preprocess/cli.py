@@ -30,6 +30,7 @@ from pathlib import Path
 from PIL import Image
 
 from . import crop as crop_mod
+from . import deblur_filter as deblur_mod
 from . import extract as extract_mod
 from . import matting as matting_mod
 from . import parsing as parsing_mod
@@ -101,6 +102,38 @@ def build_argparser() -> argparse.ArgumentParser:
     fp.set_defaults(crop=True)
     fp.add_argument("--crop-pad", type=float, default=0.15,
                     help="Fractional padding around the head bbox (crop=on).")
+
+    # ---- filter-blur ----
+    fb = sub.add_parser(
+        "filter-blur",
+        help="Score raw frames by face-region Laplacian variance and write "
+             "raw/keep_list.txt (non-destructive). Skip this stage entirely "
+             "to keep every frame.",
+    )
+    _add_common(fb)
+    fb.add_argument("--percentile", type=float, default=15.0,
+                    help="Drop frames whose variance is below this percentile "
+                         "of the sequence (default: 15).")
+    fb.add_argument("--absolute-threshold", type=float, default=None,
+                    help="Override --percentile with an absolute variance "
+                         "cutoff (frames with var >= cutoff are kept).")
+    face_group = fb.add_mutually_exclusive_group()
+    face_group.add_argument(
+        "--face-mask", dest="face_mask", action="store_true",
+        help="Measure variance only over the neck/head parsing mask "
+             "(default). Falls back to whole-frame if parsing is missing.",
+    )
+    face_group.add_argument(
+        "--no-face-mask", dest="face_mask", action="store_false",
+        help="Measure variance over the whole frame.",
+    )
+    fb.set_defaults(face_mask=True)
+    fb.add_argument("--preview-count", type=int, default=12,
+                    help="Number of blurriest dropped frames to include in "
+                         "raw/blur_preview.jpg (0 to skip).")
+    fb.add_argument("--dry-run", action="store_true",
+                    help="Report counts only; do not write keep_list / CSV / "
+                         "preview.")
 
     return p
 
@@ -205,12 +238,57 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_filter_blur(args: argparse.Namespace) -> int:
+    repo = Path(args.repo_root).resolve()
+    dataset_dir = repo / "dataset" / args.idname
+    raw = dataset_dir / "raw"
+    raw_imgs = raw / "imgs"
+    raw_parsing = raw / "parsing"
+
+    if not any(raw_imgs.glob("*.jpg")):
+        print(f"no frames under {raw_imgs}; run `preprocess prepare` first.",
+              file=sys.stderr)
+        return 1
+
+    parsing_dir: Path | None = None
+    if args.face_mask:
+        if raw_parsing.is_dir() and any(raw_parsing.glob("*_neckhead.png")):
+            parsing_dir = raw_parsing
+        else:
+            print(f"[filter-blur] --face-mask set but no parsing output under "
+                  f"{raw_parsing}; falling back to whole-frame variance.")
+
+    report = deblur_mod.run_blur_filter(
+        imgs_dir=raw_imgs,
+        out_dir=raw,
+        parsing_dir=parsing_dir,
+        percentile=args.percentile,
+        absolute=args.absolute_threshold,
+        preview_count=args.preview_count,
+        dry_run=args.dry_run,
+    )
+
+    mode = "dry-run" if args.dry_run else "write"
+    thr = report["threshold"]
+    thr_str = f"{thr:.3f}" if thr == thr else "n/a"  # NaN check
+    print(f"[filter-blur] {mode}: kept {report['kept']}/{report['total']} "
+          f"frames (dropped {report['dropped']}), threshold={thr_str}")
+    if not args.dry_run:
+        print(f"[filter-blur] wrote {report['keep_list']}")
+        print(f"[filter-blur] wrote {report['csv']}")
+        if report["preview"] is not None:
+            print(f"[filter-blur] wrote {report['preview']}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_argparser().parse_args(argv)
     if args.command == "prepare":
         return cmd_prepare(args)
     if args.command == "finalize":
         return cmd_finalize(args)
+    if args.command == "filter-blur":
+        return cmd_filter_blur(args)
     print(f"unknown command: {args.command}", file=sys.stderr)
     return 1
 
