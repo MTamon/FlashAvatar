@@ -103,15 +103,30 @@ pip install --upgrade \
 
 # chumpy needs special handling: the PyPI sdist (0.70) has a setup.py that
 # does `import pip`, which fails inside PEP 517 isolated build envs with
-# "ModuleNotFoundError: No module named 'pip'". The mattloper fork fixes
-# this and is also what FlashAvatar's own install_128.sh uses (see
-# requirements_128.txt:75). `--no-build-isolation` as a fallback lets
-# chumpy's setup.py see the env's own pip.
+# "ModuleNotFoundError: No module named 'pip'". Two known-good install
+# paths:
+#   1. `--no-build-isolation` lets chumpy's setup.py see the env's own pip
+#      (fastest, no network clone required).
+#   2. mattloper git fork, which is also what FlashAvatar's install_128.sh
+#      uses (requirements_128.txt:75) and removes the `import pip` line.
 if ! python -c "import chumpy" >/dev/null 2>&1; then
-  echo "[4/5] Installing chumpy (mattloper fork) ..."
-  pip install "git+https://github.com/mattloper/chumpy.git" \
-    || pip install --no-build-isolation chumpy \
-    || echo "warning: chumpy install failed; tracker may still lack it."
+  echo "[4/5] Installing chumpy ..."
+  # Make sure build deps chumpy's setup.py imports are present in the
+  # env (they're already there after the pytorch install above, but be
+  # defensive in case requirements.txt didn't pull them).
+  pip install --upgrade pip setuptools wheel
+  python -c "import numpy" >/dev/null 2>&1 || pip install numpy
+  if ! pip install --no-build-isolation chumpy; then
+    echo "chumpy --no-build-isolation failed; trying mattloper git fork ..."
+    if ! pip install "git+https://github.com/mattloper/chumpy.git"; then
+      echo "error: chumpy install failed by both methods. The tracker"    >&2
+      echo "cannot run without it. Re-run scripts/setup_metrical_tracker.sh" >&2
+      echo "once the network / git issue is resolved, or install manually:" >&2
+      echo "    conda activate $ENV_NAME"                                 >&2
+      echo "    pip install --no-build-isolation chumpy"                  >&2
+      exit 1
+    fi
+  fi
 fi
 
 # pytorch3d: tracker.py imports `from pytorch3d.io import load_obj`. Upstream

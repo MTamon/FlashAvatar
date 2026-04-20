@@ -61,8 +61,21 @@ if [ "${#missing[@]}" -gt 0 ]; then
   echo "error: the '$ENV_NAME' env is missing: ${missing[*]}" >&2
   echo "Repair with:" >&2
   echo "    bash scripts/setup_metrical_tracker.sh" >&2
-  echo "or manually:" >&2
-  echo "    conda activate $ENV_NAME && pip install ${missing[*]}" >&2
+  echo "or manually (the install recipe differs per package):" >&2
+  for mod in "${missing[@]}"; do
+    case "$mod" in
+      chumpy)
+        echo "    conda activate $ENV_NAME && pip install --no-build-isolation chumpy" >&2
+        ;;
+      pytorch3d)
+        echo "    conda activate $ENV_NAME && pip install --no-index --no-cache-dir pytorch3d \\" >&2
+        echo "        -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py39_cu113_pyt1121/download.html" >&2
+        ;;
+      *)
+        echo "    conda activate $ENV_NAME && pip install $mod" >&2
+        ;;
+    esac
+  done
   exit 1
 fi
 
