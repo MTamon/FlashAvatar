@@ -96,10 +96,23 @@ pip install --upgrade \
     opencv-python \
     mediapipe \
     face-alignment \
-    pyyaml loguru trimesh chumpy \
+    pyyaml loguru trimesh \
     || {
   echo "warning: pip safety-net install failed; tracker may still lack deps."
 }
+
+# chumpy needs special handling: the PyPI sdist (0.70) has a setup.py that
+# does `import pip`, which fails inside PEP 517 isolated build envs with
+# "ModuleNotFoundError: No module named 'pip'". The mattloper fork fixes
+# this and is also what FlashAvatar's own install_128.sh uses (see
+# requirements_128.txt:75). `--no-build-isolation` as a fallback lets
+# chumpy's setup.py see the env's own pip.
+if ! python -c "import chumpy" >/dev/null 2>&1; then
+  echo "[4/5] Installing chumpy (mattloper fork) ..."
+  pip install "git+https://github.com/mattloper/chumpy.git" \
+    || pip install --no-build-isolation chumpy \
+    || echo "warning: chumpy install failed; tracker may still lack it."
+fi
 
 # ---------- 5. asset download (upstream install.sh) ----------
 if [ -n "${SKIP_ASSETS:-}" ]; then
