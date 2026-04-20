@@ -156,6 +156,19 @@ else
   user_enc=$(urle "$FLAME_USER")
   pass_enc=$(urle "$FLAME_PASS")
 
+  # FLAME2020.zip / TextureSpace.zip / FLAME_masks.zip are all packaged
+  # with a top-level `FLAME2020/` directory, so unzipping directly into
+  # data/FLAME2020/ yields data/FLAME2020/FLAME2020/... . Flatten after
+  # each extraction so generic_model.pkl ends up at the expected path.
+  flatten_flame() {
+    local target="$1"
+    if [ -d "$target/FLAME2020" ]; then
+      # shellcheck disable=SC2012
+      (shopt -s dotglob nullglob; mv "$target/FLAME2020"/* "$target/" 2>/dev/null || true)
+      rmdir "$target/FLAME2020" 2>/dev/null || true
+    fi
+  }
+
   (
     cd "$abs_tracker_dir"
     mkdir -p data/FLAME2020
@@ -163,6 +176,7 @@ else
         'https://download.is.tue.mpg.de/download.php?domain=flame&sfile=FLAME2020.zip&resume=1' \
         -O FLAME2020.zip --no-check-certificate --continue
     unzip -o FLAME2020.zip -d data/FLAME2020/ && rm -f FLAME2020.zip
+    flatten_flame data/FLAME2020
     [ -f data/FLAME2020/Readme.pdf ] && \
         mv data/FLAME2020/Readme.pdf data/FLAME2020/Readme_FLAME.pdf || true
 
@@ -170,10 +184,12 @@ else
         'https://download.is.tue.mpg.de/download.php?domain=flame&resume=1&sfile=TextureSpace.zip' \
         -O TextureSpace.zip --no-check-certificate --continue
     unzip -o TextureSpace.zip -d data/FLAME2020/ && rm -f TextureSpace.zip
+    flatten_flame data/FLAME2020
 
     wget 'https://files.is.tue.mpg.de/tbolkart/FLAME/FLAME_masks.zip' \
         -O FLAME_masks.zip --no-check-certificate --continue
     unzip -o FLAME_masks.zip -d data/FLAME2020/ && rm -f FLAME_masks.zip
+    flatten_flame data/FLAME2020
 
     # Head template mesh bundle (no auth required).
     wget -O mesh.zip 'https://keeper.mpdl.mpg.de/f/f158a430ef754edba5ec/?dl=1'
@@ -219,12 +235,22 @@ echo "[4/5] Installing MICA deps into the active env ..."
 pip install insightface==0.7.3 onnx==1.17.0 onnxruntime-gpu==1.22.0 gdown==5.2.0
 
 # Share FLAME2020 between tracker and MICA: tracker already downloads it,
-# MICA just symlinks to avoid a second gated download.
+# MICA just symlinks to avoid a second gated download. Handle all three
+# possible starting states of $mica_flame_dir:
+#   - doesn't exist          -> create symlink
+#   - is a symlink           -> refresh (idempotent)
+#   - is an empty directory  -> the MICA fork ships an empty data/FLAME2020/
+#                               placeholder, which `-e` mistook for "already
+#                               populated"; rmdir + symlink.
+#   - is a non-empty dir     -> user populated it by hand, leave alone.
 mica_flame_dir="$abs_mica_dir/data/FLAME2020"
 tracker_flame_dir="$abs_tracker_dir/data/FLAME2020"
 if [ -d "$tracker_flame_dir" ]; then
   mkdir -p "$(dirname "$mica_flame_dir")"
-  if [ ! -e "$mica_flame_dir" ] || [ -L "$mica_flame_dir" ]; then
+  if [ -L "$mica_flame_dir" ] || [ ! -e "$mica_flame_dir" ]; then
+    ln -sfn "$tracker_flame_dir" "$mica_flame_dir"
+  elif [ -d "$mica_flame_dir" ] && [ -z "$(ls -A "$mica_flame_dir" 2>/dev/null || true)" ]; then
+    rmdir "$mica_flame_dir"
     ln -sfn "$tracker_flame_dir" "$mica_flame_dir"
   fi
 fi
