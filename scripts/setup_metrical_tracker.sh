@@ -36,7 +36,7 @@ TRACKER_REPO=${TRACKER_REPO:-https://github.com/MTamon/metrical-tracker.git}
 TRACKER_BRANCH=${TRACKER_BRANCH:-cuda128}
 TRACKER_DIR=${TRACKER_DIR:-external/metrical-tracker}
 MICA_REPO=${MICA_REPO:-https://github.com/MTamon/MICA.git}
-MICA_BRANCH=${MICA_BRANCH:-claude/cuda128-pytorch29-update-ZxnsN}
+MICA_BRANCH=${MICA_BRANCH:-cuda128}
 MICA_DIR=${MICA_DIR:-external/MICA}
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -191,8 +191,7 @@ else
     # data/FLAME2020/FLAME_masks/FLAME_masks.pkl path that MICA expects.
     wget 'https://files.is.tue.mpg.de/tbolkart/FLAME/FLAME_masks.zip' \
         -O FLAME_masks.zip --no-check-certificate --continue
-    mkdir -p data/FLAME2020/FLAME_masks
-    unzip -o FLAME_masks.zip -d data/FLAME2020/FLAME_masks/ && rm -f FLAME_masks.zip
+    unzip -o FLAME_masks.zip -d data/FLAME2020 && rm -f FLAME_masks.zip
 
     # Head template mesh bundle (no auth required).
     wget -O mesh.zip 'https://keeper.mpdl.mpg.de/f/f158a430ef754edba5ec/?dl=1'
