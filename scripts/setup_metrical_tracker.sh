@@ -92,6 +92,15 @@ fi
 echo "[2/3] Installing tracker deps into the active env ..."
 pip install -r "$abs_tracker_dir/requirements.txt"
 
+# Promote local datasets/ to a regular package. Upstream tracker ships
+# datasets/ without __init__.py, so it's treated as a PEP 420 namespace
+# package — and any `datasets` regular package already installed in the
+# active env's site-packages (e.g. HuggingFace datasets, pulled in as a
+# transitive dep of transformers / ML tooling) will shadow it. A zero-byte
+# __init__.py makes the tracker's folder a regular package, giving it
+# priority over site-packages when run from the tracker dir.
+touch "$abs_tracker_dir/datasets/__init__.py"
+
 # chumpy is not in requirements.txt but both the tracker and FlashAvatar
 # need it. install_128.sh already installs it, but repair if missing.
 if ! python -c "import chumpy" >/dev/null 2>&1; then

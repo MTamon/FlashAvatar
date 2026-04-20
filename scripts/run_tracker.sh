@@ -62,6 +62,15 @@ fi
 mkdir -p "$out_dir"
 cd "$abs_tracker_dir"
 
+# Belt-and-suspenders: make sure datasets/ is a regular package so that
+# HuggingFace's `datasets` (if it happens to be installed in the active
+# env) doesn't shadow the tracker's local datasets module. The setup
+# script already does this, but run after a manual re-clone or partial
+# setup without it, the file may be missing.
+if [ -d datasets ] && [ ! -f datasets/__init__.py ]; then
+  touch datasets/__init__.py
+fi
+
 echo "[tracker] $imgs_dir -> $out_dir"
 python tracker.py \
     --input_dir "$imgs_dir" \
