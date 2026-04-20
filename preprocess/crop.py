@@ -93,12 +93,23 @@ def compute_bbox(parsing_dir: Path | None, image_size: tuple[int, int],
         y1 = y0 + side
 
     size = max(x1 - x0, y1 - y0)
+    # Portrait framing where the padded head+neck extent exceeds the
+    # frame's shortest dim (e.g. 720x1280 phone video with a big head).
+    # Clamp to a square that physically fits, centred on the head.
+    if size > min(W, H):
+        cx = (x0 + x1) / 2
+        cy = (y0 + y1) / 2
+        new_size = min(W, H)
+        print(
+            f"[crop] warning: head bbox side {size}px exceeds frame shortest "
+            f"dim {new_size}px; clamping to {new_size}px. Some head/neck "
+            f"edges may be trimmed. Alternatives: --no-crop, or "
+            f"--crop-pad 0.")
+        size = new_size
+        x0 = int(round(cx - size / 2))
+        y0 = int(round(cy - size / 2))
     x0 = max(0, min(W - size, x0))
     y0 = max(0, min(H - size, y0))
-    if size > min(W, H):
-        raise RuntimeError(
-            f"bbox side {size} exceeds shortest image dim {min(W, H)}; "
-            f"the frame cannot contain a square of that size")
     return Bbox(x0=int(x0), y0=int(y0), size=int(size))
 
 
