@@ -114,6 +114,23 @@ if ! python -c "import chumpy" >/dev/null 2>&1; then
     || echo "warning: chumpy install failed; tracker may still lack it."
 fi
 
+# pytorch3d: tracker.py imports `from pytorch3d.io import load_obj`. Upstream
+# requirements.txt does NOT list pytorch3d; metrical-tracker's install.sh
+# tries to build it from source which is slow and often fails on CUDA
+# mismatch. Use Facebook's prebuilt wheel for py39 + torch 1.12.1 + cu113,
+# with a source build as a last-resort fallback.
+if ! python -c "import pytorch3d" >/dev/null 2>&1; then
+  echo "[4/5] Installing pytorch3d (prebuilt wheel for py39/torch1.12.1/cu113) ..."
+  pip install fvcore iopath
+  pip install --no-index --no-cache-dir pytorch3d \
+      -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py39_cu113_pyt1121/download.html \
+    || {
+      echo "prebuilt wheel unavailable; falling back to source build (slow)."
+      pip install "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.2" \
+        || echo "warning: pytorch3d install failed; tracker.py will error on import."
+    }
+fi
+
 # ---------- 5. asset download (upstream install.sh) ----------
 if [ -n "${SKIP_ASSETS:-}" ]; then
   echo "[5/5] SKIP_ASSETS set; skipping upstream install.sh (assets)."
