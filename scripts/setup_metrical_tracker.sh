@@ -279,18 +279,6 @@ if [ -d "$tracker_flame_dir" ]; then
   fi
 fi
 
-# PyTorch 2.6 flipped the default of torch.load(weights_only=...) to True.
-# The MTamon/MICA fork's micalib/models/mica.py explicitly passes
-# weights_only=True, and mica.tar contains numpy-pickled tensors that
-# aren't on torch's safe-globals allowlist → _pickle.UnpicklingError.
-# We trust the upstream MICA checkpoint, so flip it back to False.
-# Idempotent: grep guards against re-patching.
-mica_load="$abs_mica_dir/micalib/models/mica.py"
-if [ -f "$mica_load" ] && grep -q 'weights_only=True' "$mica_load"; then
-  sed -i 's/weights_only=True/weights_only=False/g' "$mica_load"
-  echo "[4/5] patched $(basename "$mica_load"): weights_only=True -> False"
-fi
-
 # ---------- 6. MICA model assets ----------
 # mica.tar (Google Drive) + insightface antelopev2/buffalo_l (Google Drive).
 # insightface looks up models under ~/.insightface/models/<name>/.
