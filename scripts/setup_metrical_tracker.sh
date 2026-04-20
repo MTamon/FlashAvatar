@@ -298,22 +298,43 @@ else
 
   insight_dir="$HOME/.insightface/models"
   mkdir -p "$insight_dir"
-  if [ ! -d "$insight_dir/antelopev2" ]; then
-    echo "[5/5] Downloading insightface antelopev2 ..."
-    gdown --id 16PWKI_RjjbE4_kqpElG-YFqe8FpXjads -O "$insight_dir/antelopev2.zip"
-    unzip -o "$insight_dir/antelopev2.zip" -d "$insight_dir/"
-    rm -f "$insight_dir/antelopev2.zip"
-  else
-    echo "[5/5] insightface antelopev2 already present, skipping."
-  fi
-  if [ ! -d "$insight_dir/buffalo_l" ]; then
-    echo "[5/5] Downloading insightface buffalo_l ..."
-    gdown --id 1navJMy0DTr1_DHjLWu1i48owCPvXWfYc -O "$insight_dir/buffalo_l.zip"
-    unzip -o "$insight_dir/buffalo_l.zip" -d "$insight_dir/"
-    rm -f "$insight_dir/buffalo_l.zip"
-  else
-    echo "[5/5] insightface buffalo_l already present, skipping."
-  fi
+
+  # Place an insightface model pack at $insight_dir/$name/*.onnx. Handles
+  # three starting states:
+  #   - already correct (.onnx directly under $insight_dir/$name/): skip
+  #   - nested from a previous botched extraction
+  #     ($insight_dir/$name/$name/*.onnx, which is what insightface's
+  #     own runtime auto-download produces and breaks `FaceAnalysis`):
+  #     flatten
+  #   - absent / empty: gdown + extract + flatten-if-nested
+  # Sentinel = at least one .onnx directly under $insight_dir/$name/.
+  fix_insightface_model() {
+    local name=$1 gid=$2
+    local model_dir="$insight_dir/$name"
+    if compgen -G "$model_dir/*.onnx" >/dev/null; then
+      echo "[5/5] insightface $name already present, skipping."
+      return
+    fi
+    if compgen -G "$model_dir/$name/*.onnx" >/dev/null; then
+      echo "[5/5] flattening nested insightface $name ..."
+      (shopt -s dotglob nullglob; mv "$model_dir/$name"/* "$model_dir/" 2>/dev/null || true)
+      rmdir "$model_dir/$name" 2>/dev/null || true
+      return
+    fi
+    echo "[5/5] Downloading insightface $name ..."
+    rm -rf "$model_dir" "$model_dir.zip"
+    mkdir -p "$model_dir"
+    gdown --id "$gid" -O "$model_dir.zip"
+    unzip -o "$model_dir.zip" -d "$model_dir/"
+    rm -f "$model_dir.zip"
+    if [ -d "$model_dir/$name" ] && compgen -G "$model_dir/$name/*.onnx" >/dev/null; then
+      (shopt -s dotglob nullglob; mv "$model_dir/$name"/* "$model_dir/" 2>/dev/null || true)
+      rmdir "$model_dir/$name" 2>/dev/null || true
+    fi
+  }
+
+  fix_insightface_model antelopev2 16PWKI_RjjbE4_kqpElG-YFqe8FpXjads
+  fix_insightface_model buffalo_l 1navJMy0DTr1_DHjLWu1i48owCPvXWfYc
 fi
 
 cat <<EOM
