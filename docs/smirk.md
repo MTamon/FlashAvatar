@@ -51,7 +51,7 @@ encoder output:
 | `flame.shape`       | (1, 300)  | `shape_params` per frame    | **median** over the first `--shape-frames` detected frames, shared across every `.frame` file (matches metrical-tracker's "single identity" convention) |
 | `flame.exp`         | (1, 100)  | `expression_params` (1, 50) | **zero-pad** the last 50 dims. FlashAvatar's FLAME basis is 100-dim but the extra 50 are simply never excited by SMIRK. |
 | `flame.jaw`         | (1, 6)    | `jaw_params` axis-angle (3) | `matrix_to_rotation_6d(axis_angle_to_matrix(aa))` |
-| `flame.eyes`        | (1, 12)   | **none** (SMIRK doesn't regress eyes) | identity 6D × 2 (`--eye-mode zero`). `--eye-mode blendshapes` is reserved for a MediaPipe-blendshape driven eye tracker. |
+| `flame.eyes`        | (1, 12)   | **none** (SMIRK doesn't regress eyes) | identity 6D × 2. The avatar renders with static eyes; drive them externally if you need eye motion. |
 | `flame.eyelids`     | (1, 2)    | `eyelid_params`             | clamp `[0, 1]` |
 | `opencv.R`          | (1, 3, 3) | `pose_params` axis-angle    | `Rodrigues(aa)` then `diag(1,-1,-1) @ R` to convert OpenGL (y-up) → OpenCV (y-down, +z forward). |
 | `opencv.t`          | (1, 3)    | `cam=[s, tx, ty]` + crop `tform` | see "Camera synthesis" below |
@@ -104,13 +104,11 @@ invisible to FlashAvatar.
 
 ## Caveats
 
-1. **SMIRK does not regress eye-ball rotation.** The default
-   `--eye-mode zero` passes an identity 6D rotation; expect the eyes to
-   be static in the rendered avatar unless you separately drive them.
-   The `blendshapes` mode is a placeholder for MediaPipe-blendshape
-   mapping; it is currently implemented as identity-equivalent to keep
-   the `.frame` format consistent. Wiring it up is tracked as a
-   follow-up (see `smirk_convert._default_eye_pose_6d`).
+1. **SMIRK does not regress eye-ball rotation.** We write an identity
+   6D rotation for each eye; the trained avatar will render with static
+   eyes. If you need eye motion, drive `flame.eyes` from an external
+   signal (e.g. MediaPipe Face Landmarker blendshapes, or a separate
+   eye-gaze regressor) as a post-pass after `preprocess smirk`.
 2. **SMIRK's weak-perspective camera is an approximation.** The
    ortho→persp conversion produces negligible error when the head is
    small relative to the image and the focal is large, but can
@@ -132,6 +130,111 @@ invisible to FlashAvatar.
    SMIRK has no bbox detector; we detect with MediaPipe and propagate
    the last-good landmarks through frames where detection fails. If the
    first frame has no face, the runner errors out — trim the video.
+
+## Running SMIRK's own demos (optional smoke test)
+
+`scripts/setup_smirk.sh` clones SMIRK into `external/smirk/`. Once it
+finishes, you can run SMIRK's upstream demos directly from that checkout
+to confirm the install is healthy, independently of FlashAvatar's
+pipeline. These demos render an overlay / video so you can eyeball the
+tracking quality before committing to a full FlashAvatar run.
+
+All demos run in the *same* active FlashAvatar venv — no separate env
+switch needed (see "Environment compatibility" below).
+
+```bash
+source .venv/bin/activate
+cd external/smirk
+
+# (first time only) fetch a small bundle of sample videos for the demos
+bash prepare_demos.sh
+
+# Single image -> FLAME overlay + a rendered image
+bash demos/run_demo.sh --input_path samples/test_image2.png --crop
+#   writes external/smirk/output/ ... (see SMIRK's README for flags)
+
+# Video -> overlay video
+bash demos/run_demo_video.sh --input_path samples/dafoe.mp4 --crop
+#   writes external/smirk/output/dafoe/dafoe.mp4
+
+# Video -> raw FLAME parameters (.pt dict, no rendering)
+bash demos/run_demo_save_flame.sh --input_path samples/dafoe.mp4 --crop
+#   writes external/smirk/output/dafoe/dafoe.pt
+```
+
+Common useful flags (forwarded by the `.sh` wrappers to the underlying
+`demos/demo*.py`):
+
+| Flag | Purpose |
+|---|---|
+| `--crop` | Use MediaPipe to auto-crop faces (match what FlashAvatar's SMIRK path does). Omit only if your inputs are already face-cropped. |
+| `--mp_delegate {cpu,gpu}` | Where to run MediaPipe face detection. `gpu` is faster on CUDA boxes but needs the MediaPipe GPU delegate (default fallback is CPU). |
+| `--with_eye_pose` | (save_flame only) Also derive eye rot6d + eyelids from MediaPipe blendshapes and pack them into the output .pt. Independent of FlashAvatar. |
+| `--batch_size N` | Batch size for encoder inference. |
+| `--benchmark` | Print per-stage timing. |
+
+**Note**: these demos are SMIRK's own tooling; their output format
+(`.pt` dicts with `shape/exp/pose/cam/...` per frame) is **different
+from** FlashAvatar's `.frame` format. To feed SMIRK into FlashAvatar,
+use `scripts/run_smirk_tracker.sh` (or `preprocess smirk`) — which
+invokes SMIRK's encoder programmatically and performs the .frame
+conversion described above. Running SMIRK's demos is strictly a sanity
+check, not a replacement for the integration script.
+
+Trouble-shooting:
+
+- `ModuleNotFoundError: src.smirk_encoder` when running a demo → you
+  left the `external/smirk/` directory before invoking; `cd` back.
+- `FileNotFoundError: .../SMIRK_em1.pt` → `quick_install.sh` didn't
+  complete; re-run `bash external/smirk/quick_install.sh`.
+- Poor tracking on a specific face → try `--scale 1.6` in
+  `demo_video.py` for a looser crop, or provide your own bbox.
+
+See `external/smirk/README.md` for the full flag reference.
+
+## Environment compatibility with FlashAvatar
+
+The cuda128 branch of SMIRK is deliberately pin-aligned with
+FlashAvatar's install_128.sh:
+
+| | FlashAvatar `install_128.sh` | SMIRK `external/smirk/install_128.sh` |
+|---|---|---|
+| Python | 3.11 | 3.11 |
+| CUDA   | 12.8 | 12.8 |
+| PyTorch | 2.9.1 | 2.9.1 |
+| numpy  | 2.2.6 | 2.2.6 |
+| chumpy | `git+mattloper/chumpy@main` (numpy 2 compat) | same |
+
+SMIRK-only extras that `setup_smirk.sh` pulls in:
+`timm`, `albumentations`, `mediapipe`, `scikit-image`, and
+`pytorch_lightning` (optional, inference code tolerates its absence).
+None of these are on FlashAvatar's critical path; installing them does
+not alter the torch / pytorch3d / diff_gaussian_rasterization /
+simple_knn builds that `install_128.sh` produced.
+
+The integration runs *both* SMIRK and FlashAvatar in a **single shared
+venv** — there is no second environment to activate. The SMIRK code
+itself is loaded via `sys.path.insert(0, external/smirk)` at import
+time (see `preprocess/smirk_tracker._ensure_on_pythonpath`) so the
+cloned repo doesn't need to be pip-installed as a package.
+
+`setup_smirk.sh` runs a post-install sanity check that verifies the
+key imports are still intact (`torch`, `pytorch3d`,
+`diff_gaussian_rasterization`, `simple_knn`, and SMIRK's
+`src.smirk_encoder`). If you ever see a failure there, something in
+SMIRK's install chain downgraded a shared package — report the diff and
+we'll fix the pin.
+
+Known non-conflicts (paranoia list):
+
+- `mediapipe` is installed by both metrical-tracker's
+  `setup_metrical_tracker.sh` and SMIRK's installer. Both pin the same
+  line (0.10.x); whichever runs last wins, but both work.
+- `chumpy` is installed from GitHub main by both FlashAvatar and
+  SMIRK. Re-running either is idempotent (pip detects the same
+  commit).
+- `pytorch_lightning` is only a SMIRK-side dep and does NOT pull a
+  different torch; FlashAvatar never imports it.
 
 ## Verifying the output
 

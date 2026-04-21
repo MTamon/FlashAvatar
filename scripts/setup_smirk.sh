@@ -119,6 +119,65 @@ else
   fi
 fi
 
+# ---------- 5. post-install sanity check ----------
+# SMIRK's install_128.sh pulls a handful of packages with dependency
+# resolution enabled, so in principle it could reinstall something
+# FlashAvatar depends on (torch, pytorch3d, the two CUDA extensions, ...).
+# Catch that here loudly with a one-shot import check — much nicer than
+# finding out mid-training.
+echo "[post-install] verifying FlashAvatar + SMIRK imports still resolve ..."
+export SMIRK_ROOT="$abs_smirk_dir"
+check_out=$(python - <<'PY'
+import importlib
+import sys
+
+probes = [
+    ("torch",                       "2.9."),
+    ("pytorch3d",                   None),
+    ("diff_gaussian_rasterization", None),
+    ("simple_knn",                  None),
+    ("numpy",                       "2."),
+    ("mediapipe",                   None),
+]
+
+rc = 0
+for mod, want in probes:
+    try:
+        m = importlib.import_module(mod)
+    except Exception as e:
+        print(f"  FAIL  {mod}: {e}")
+        rc = 1
+        continue
+    ver = getattr(m, "__version__", "?")
+    note = ""
+    if want and not str(ver).startswith(want):
+        note = f"  (expected {want}*, got {ver})"
+        rc = 1
+    print(f"  OK    {mod} {ver}{note}")
+
+# SMIRK-specific probe: load the encoder module via the cloned repo path.
+import os
+smirk_root = os.environ["SMIRK_ROOT"]
+sys.path.insert(0, smirk_root)
+try:
+    from src.smirk_encoder import SmirkEncoder  # noqa: F401
+    print(f"  OK    src.smirk_encoder (via {smirk_root})")
+except Exception as e:
+    print(f"  FAIL  src.smirk_encoder: {e}")
+    rc = 1
+
+sys.exit(rc)
+PY
+) && sanity_rc=0 || sanity_rc=$?
+echo "$check_out"
+if [ "$sanity_rc" -ne 0 ]; then
+  echo ""
+  echo "error: post-install sanity check failed. SMIRK's installer may have" >&2
+  echo "       reinstalled something FlashAvatar needs at a different pin." >&2
+  echo "       Re-run: bash install_128.sh   (then re-run this script)" >&2
+  exit 1
+fi
+
 cat <<EOM
 
 ================================================================================

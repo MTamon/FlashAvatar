@@ -36,7 +36,6 @@ class SmirkConfig:
     crop_size: int = 224             # SMIRK encoder input size
     focal_px: float = 5000.0         # synthesized K focal, in full-frame px
     shape_frames: int = 150          # canonicalize shape over this many frames
-    eye_mode: str = "zero"           # "zero" | "blendshapes"
     batch_size: int = 8
     overwrite: bool = False
 
@@ -86,7 +85,7 @@ def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
             continue
         frame_dict = to_flashavatar_frame(
             p.result, shape=shape, img_size=img_size,
-            focal_px=cfg.focal_px, eye_mode=cfg.eye_mode,
+            focal_px=cfg.focal_px,
         )
         torch.save(frame_dict, dst)
         n_written += 1

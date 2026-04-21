@@ -62,7 +62,7 @@ def dump_verification(payloads, shape, img_size, cfg, verify_dir: Path) -> None:
                 np.clip(r.eyelid_params, 0.0, 1.0).astype(np.float32)
             ).unsqueeze(0).to(cfg.device)
             eyes_t = torch.from_numpy(
-                _default_eye_pose_6d("zero")
+                _default_eye_pose_6d()
             ).float().unsqueeze(0).to(cfg.device)
             verts = flame.forward_geo(
                 shape_t, expression_params=exp_t,

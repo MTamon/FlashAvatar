@@ -228,12 +228,14 @@ bash scripts/run_tracker.sh myface --smirk        # instead of plain run_tracker
 python scripts/preprocess.py finalize --idname myface --crop
 ```
 
-SMIRK is NOT installed by `install_128.sh`. See
-[docs/smirk.md](docs/smirk.md) for the compatibility matrix (exp 50 →
-100 zero-pad, axis-angle → 6D rot conversions, weak-perspective →
-perspective `K/R/t` via the internal 224 crop's similarity transform)
-and caveats (no eye-ball rotation, per-frame shape canonicalized by
-median).
+SMIRK is NOT installed by `install_128.sh`; the SMIRK env lives entirely
+under `external/smirk/` (except for a handful of shared Python packages
+installed into FlashAvatar's venv). See [docs/smirk.md](docs/smirk.md)
+for the compatibility matrix (exp 50 → 100 zero-pad, axis-angle → 6D
+rot conversions, weak-perspective → perspective `K/R/t` via the internal
+224 crop's similarity transform), caveats (no eye-ball rotation,
+per-frame shape canonicalized by median), how to validate the install
+by running SMIRK's own demos, and an env-compatibility note.
 
 #### Step 1 — Extract video frames
 

@@ -162,11 +162,6 @@ def build_argparser() -> argparse.ArgumentParser:
     sm.add_argument("--shape-frames", type=int, default=150,
                     help="Canonicalize FLAME identity across the first N "
                          "detected frames (median).")
-    sm.add_argument("--eye-mode", default="zero",
-                    choices=["zero", "blendshapes"],
-                    help="SMIRK doesn't regress eye-ball rotation. 'zero' "
-                         "uses identity 6D; 'blendshapes' (reserved) would "
-                         "use MediaPipe blendshapes.")
     sm.add_argument("--verify-dir", type=Path, default=None,
                     help="If set, dump landmark reprojection stats + overlay "
                          "JPEGs to this directory for sanity check.")
@@ -352,7 +347,6 @@ def cmd_smirk(args: argparse.Namespace) -> int:
         crop_scale=args.crop_scale,
         focal_px=args.focal_px,
         shape_frames=args.shape_frames,
-        eye_mode=args.eye_mode,
         batch_size=args.batch_size,
         overwrite=args.overwrite,
     )

@@ -57,7 +57,6 @@ def to_flashavatar_frame(
     shape: np.ndarray,
     img_size: tuple[int, int],
     focal_px: float,
-    eye_mode: str = "zero",
 ) -> dict:
     """Build the dict saved as `.frame` by `torch.save`.
 
@@ -69,7 +68,7 @@ def to_flashavatar_frame(
     # --- FLAME params --------------------------------------------------
     shape_100 = _pad_expression(r.expression_params, 100)   # (100,)
     jaw_6d = _axis_angle_to_rot6d(r.jaw_params)             # (6,)
-    eyes_12 = _default_eye_pose_6d(eye_mode)                # (12,)
+    eyes_12 = _default_eye_pose_6d()                         # (12,)
     flame_dict = {
         "shape": torch.from_numpy(shape).float().unsqueeze(0),       # (1, 300)
         "exp": torch.from_numpy(shape_100).float().unsqueeze(0),     # (1, 100)
@@ -120,14 +119,12 @@ def _axis_angle_to_rot6d(aa: np.ndarray) -> np.ndarray:
     return matrix_to_rotation_6d(R)[0].numpy()                   # (6,)
 
 
-def _default_eye_pose_6d(mode: str) -> np.ndarray:
-    # Identity 6D rotation is the first two columns of I_3: [1,0,0, 0,1,0].
-    # Stack twice (L eye + R eye) -> (12,). The 'blendshapes' option is
-    # reserved for a MediaPipe-blendshape-driven eye tracker; unimplemented
-    # here because FlashAvatar's FLAME currently ignores eye params unless
-    # the deform MLP is retrained to consume them — zero (identity) is safe.
-    if mode not in ("zero", "identity", "blendshapes"):
-        raise ValueError(f"unknown eye_mode: {mode}")
+def _default_eye_pose_6d() -> np.ndarray:
+    # SMIRK does not regress eye-ball rotation. We write identity 6D
+    # rotation (first two columns of I_3: [1,0,0, 0,1,0]) for each eye.
+    # FlashAvatar's deform MLP still consumes `eyes_pose`, so the avatar
+    # will render with static eyes. Live eye tracking on top of SMIRK is
+    # out of scope for this tracker.
     eye = np.array([1, 0, 0, 0, 1, 0], dtype=np.float32)
     return np.concatenate([eye, eye], axis=0)
 
