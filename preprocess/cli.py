@@ -176,6 +176,18 @@ def build_argparser() -> argparse.ArgumentParser:
     sm.add_argument("--verify-dir", type=Path, default=None,
                     help="If set, dump landmark reprojection stats + overlay "
                          "JPEGs to this directory for sanity check.")
+    sm.add_argument("--demo-video", type=Path, default=None,
+                    help="If set, render an overlay mp4 at this path with "
+                         "bbox + MediaPipe landmarks + FLAME mesh reprojection "
+                         "drawn on the source frames. Writes a sibling "
+                         "`<stem>_stats.csv` with per-frame bbox/translation "
+                         "first-differences so jitter is visible as a time "
+                         "series. Useful to diagnose whether jitter originates "
+                         "at the landmark / crop / encoder / camera layer.")
+    sm.add_argument("--demo-fps", type=float, default=25.0,
+                    help="Playback fps for --demo-video (default 25). The "
+                         "SMIRK pipeline is frame-indexed, so this is a hint "
+                         "for the mp4 encoder only.")
 
     return p
 
@@ -364,7 +376,9 @@ def cmd_smirk(args: argparse.Namespace) -> int:
     )
     print(f"[smirk] {raw_imgs} -> {ckpt_raw}")
     n = smirk_mod.run(cfg, raw_imgs, ckpt_raw,
-                      verify_dir=args.verify_dir)
+                      verify_dir=args.verify_dir,
+                      demo_path=args.demo_video,
+                      demo_fps=args.demo_fps)
     print(f"[smirk] wrote {n} .frame files")
     print(f"[smirk] next: python scripts/preprocess.py finalize "
           f"--idname {args.idname}")

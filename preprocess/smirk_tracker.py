@@ -46,7 +46,9 @@ class SmirkConfig:
 
 
 def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
-        verify_dir: Path | None = None) -> int:
+        verify_dir: Path | None = None,
+        demo_path: Path | None = None,
+        demo_fps: float = 25.0) -> int:
     """Drive the whole tracker: detect+crop+encode+convert+write.
 
     Returns the number of `.frame` files written.
@@ -98,6 +100,10 @@ def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
     if verify_dir is not None:
         from preprocess.smirk_verify import dump_verification
         dump_verification(payloads, shape, img_size, cfg, verify_dir)
+
+    if demo_path is not None:
+        from preprocess.smirk_demo import dump_demo
+        dump_demo(payloads, shape, img_size, cfg, demo_path, fps=demo_fps)
 
     return n_written
 
