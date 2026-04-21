@@ -1,342 +1,336 @@
-# SMIRK as an optional FLAME feature extractor
+# SMIRK — オプションの FLAME 特徴抽出器
 
-FlashAvatar's default tracker is [metrical-tracker](https://github.com/Zielon/metrical-tracker)
-(via MTamon's `claude0420` fork), which performs an optimization-based
-FLAME fit per frame. It is accurate on "studio-quality" sequences like
-the Obama example but **fails on videos with large head rotations or
-motion blur** — the per-frame optimization is sensitive to the initial
-guess and accumulates errors when the head moves quickly.
+FlashAvatar の既定トラッカーは [metrical-tracker](https://github.com/Zielon/metrical-tracker)
+（MTamon の `claude0420` フォーク経由）で、フレームごとに最適化ベースで
+FLAME フィットを行います。Obama の例のような「スタジオ品質」のシーケンス
+では正確ですが、**頭部の大きな回転やモーションブラーを含む動画では
+失敗します** — フレーム単位の最適化は初期値に敏感で、頭が素早く動くと
+誤差が蓄積するためです。
 
-[SMIRK](https://github.com/MTamon/smirk) is a feed-forward FLAME
-encoder: it regresses FLAME parameters in a single network pass per
-frame, making it robust to fast motion. The `release/cuda128` branch of
-MTamon's fork is pin-aligned with FlashAvatar (Python 3.11 / PyTorch
-2.9.1 / CUDA 12.8), so it runs in the same environment as FlashAvatar —
-no extra env needed.
+[SMIRK](https://github.com/MTamon/smirk) はフィードフォワードの FLAME
+エンコーダです。1 フレームあたり 1 回のネットワーク順伝播で FLAME
+パラメータを回帰するため、速い動きに頑健です。MTamon フォークの
+`release/cuda128` ブランチは FlashAvatar（Python 3.11 / PyTorch
+2.9.1 / CUDA 12.8）とピンが揃っているので、FlashAvatar と同じ環境で
+動作します — 追加の環境は不要です。
 
-**SMIRK is opt-in.** It is not installed by `install_128.sh`. Install
-it separately with `scripts/setup_smirk.sh` only when you need it.
+**SMIRK はオプトインです。** `install_128.sh` ではインストールされません。
+必要になったときだけ `scripts/setup_smirk.sh` で個別にインストールしてください。
 
-## Quick start
+## クイックスタート
 
 ```bash
 source .venv/bin/activate
-bash scripts/setup_smirk.sh                      # one-time
+bash scripts/setup_smirk.sh                      # 初回のみ
 
-# Instead of:
+# 次のコマンドの代わりに:
 #   bash scripts/run_tracker.sh <idname>
-# run:
-bash scripts/run_tracker.sh <idname> --smirk     # dispatcher
-# or directly:
+# こちらを実行:
+bash scripts/run_tracker.sh <idname> --smirk     # ディスパッチャ
+# または直接:
 bash scripts/run_smirk_tracker.sh <idname>
-# or via the CLI:
+# あるいは CLI 経由:
 python scripts/preprocess.py smirk --idname <idname>
 
-# Finalize is identical regardless of tracker:
+# finalize はどのトラッカーでも同じ:
 python scripts/preprocess.py finalize --idname <idname>
 
-# Then train as usual:
+# あとは通常どおり学習:
 python train.py --idname <idname>
 ```
 
-`--eye-mode zero` is the default — identity eye pose for every frame, so
-the trained avatar's eyes stay locked straight ahead. Pass
-`--eye-mode blendshapes` to **enable eye tracking**: per-frame eye
-rotation is derived from MediaPipe ARKit blendshapes
-(`eyeLookIn/Out/Up/Down*`) captured alongside each SMIRK detection, and
-the trained avatar will follow the subject's gaze. See caveat #1 for the
-exact mapping.
+既定は `--eye-mode zero` で、全フレームで恒等の目ポーズを書き出すため、
+学習されたアバターの目は正面を向いたまま固定されます。
+**視線トラッキングを有効化**するには `--eye-mode blendshapes` を指定してください。
+各 SMIRK 検出時に同時取得される MediaPipe ARKit ブレンドシェイプ
+(`eyeLookIn/Out/Up/Down*`) からフレームごとの目の回転が導出され、
+学習済みアバターが被写体の視線を追うようになります。
+厳密なマッピングは注意事項 #1 を参照してください。
 
-## Feature compatibility matrix
+## 機能互換性マトリクス
 
-FlashAvatar's `.frame` file format (see
-[preprocessing.md](preprocessing.md) for the full spec) expects the
-following keys. This table shows how each is derived from SMIRK's
-encoder output:
+FlashAvatar の `.frame` ファイル形式（仕様全体は
+[preprocessing.md](preprocessing.md) 参照）は、以下のキーを想定しています。
+この表は、それぞれが SMIRK のエンコーダ出力からどのように導出されるかを示します。
 
-| `.frame` key        | Shape     | SMIRK source                | Conversion |
-|---------------------|-----------|-----------------------------|-----------|
-| `flame.shape`       | (1, 300)  | `shape_params` per frame    | **median** over the first `--shape-frames` detected frames, shared across every `.frame` file (matches metrical-tracker's "single identity" convention) |
-| `flame.exp`         | (1, 100)  | `expression_params` (1, 50) | **zero-pad** the last 50 dims. FlashAvatar's FLAME basis is 100-dim but the extra 50 are simply never excited by SMIRK. |
-| `flame.jaw`         | (1, 6)    | `jaw_params` axis-angle (3) | `matrix_to_rotation_6d(axis_angle_to_matrix(aa))` |
-| `flame.eyes`        | (1, 12)   | identity (default) **or** **MediaPipe Face Landmarker blendshapes** when `--eye-mode blendshapes` is passed | Default `--eye-mode zero` writes identity 6D × 2 (static eyes). `--eye-mode blendshapes` enables eye tracking: per-eye `axis_angle = [(down - up) * 0.6, ±(in - out) * 0.6, 0]` -> 3×3 rotation -> pytorch3d rot6d. Yaw sign is mirrored for the right eye so both eyes converge when the subject looks inward. Falls back to identity for frames with no detection. |
-| `flame.eyelids`     | (1, 2)    | `eyelid_params`             | clamp `[0, 1]` |
-| `opencv.R`          | (1, 3, 3) | `pose_params` axis-angle    | `Rodrigues(aa)` then `diag(1,-1,-1) @ R` to convert OpenGL (y-up) → OpenCV (y-down, +z forward). |
-| `opencv.t`          | (1, 3)    | `cam=[s, tx, ty]` + crop `tform` | see "Camera synthesis" below |
-| `opencv.K`          | (1, 3, 3) | synthesized                 | `f_px = --focal-px` (default 5000), principal point = full-frame centre. |
-| `img_size`          | (W, H)    | full raw frame resolution   | `preprocess finalize` later rewrites K and `img_size` to the final 512×512 head crop — same contract as metrical-tracker. |
+| `.frame` キー       | 形状      | SMIRK 由来                       | 変換 |
+|---------------------|-----------|----------------------------------|------|
+| `flame.shape`       | (1, 300)  | フレームごとの `shape_params`    | 先頭から検出できた `--shape-frames` フレームの**中央値**を全 `.frame` で共有（metrical-tracker の「単一アイデンティティ」方針と一致） |
+| `flame.exp`         | (1, 100)  | `expression_params` (1, 50)      | 末尾 50 次元を**ゼロパディング**。FlashAvatar の FLAME 基底は 100 次元だが、追加の 50 は SMIRK では励起されない。 |
+| `flame.jaw`         | (1, 6)    | `jaw_params`（軸角・3 次元）     | `matrix_to_rotation_6d(axis_angle_to_matrix(aa))` |
+| `flame.eyes`        | (1, 12)   | 既定では恒等、**または** `--eye-mode blendshapes` 指定時は **MediaPipe Face Landmarker ブレンドシェイプ** | 既定 `--eye-mode zero` は恒等 6D × 2（固定目）を書き込む。`--eye-mode blendshapes` で視線追従を有効化：左右それぞれ `axis_angle = [(down - up) * 0.6, ±(in - out) * 0.6, 0]` → 3×3 回転 → pytorch3d rot6d。被写体が内側を見たとき両目が寄るよう、右目はヨー符号を反転する。検出なしのフレームでは恒等にフォールバック。 |
+| `flame.eyelids`     | (1, 2)    | `eyelid_params`                  | `[0, 1]` にクランプ |
+| `opencv.R`          | (1, 3, 3) | `pose_params`（軸角）            | `Rodrigues(aa)` のあと `diag(1,-1,-1) @ R` で OpenGL（y 上向き）→ OpenCV（y 下向き、+z 前方）に変換。 |
+| `opencv.t`          | (1, 3)    | `cam=[s, tx, ty]` + クロップ `tform` | 後述「カメラ合成」参照 |
+| `opencv.K`          | (1, 3, 3) | 合成                             | `f_px = --focal-px`（既定 5000）、主点はフルフレーム中心。 |
+| `img_size`          | (W, H)    | フルの生フレーム解像度           | 後段の `preprocess finalize` が K と `img_size` を最終の 512×512 頭部クロップに書き換える — metrical-tracker と同じ契約。 |
 
-### Camera synthesis (the subtle one)
+### カメラ合成（細かいが重要）
 
-SMIRK uses a **weak-perspective / orthographic** camera on its 224×224
-internal crop. FlashAvatar uses a full **perspective** camera (OpenCV
-`K/R/t`). The conversion has to satisfy two constraints:
+SMIRK は 224×224 の内部クロップに対して**弱透視／正射影**カメラを使います。
+一方 FlashAvatar は完全な**透視投影**カメラ（OpenCV `K/R/t`）を使います。
+変換は 2 つの条件を満たさなければなりません。
 
-1. The projected FLAME mesh must land at the correct pixel in the full
-   raw frame (not SMIRK's 224 crop) — so the final 512 head crop that
-   `preprocess finalize` will carve out has the right head position.
-2. The projected mesh must have the correct **size** on screen.
+1. 投影された FLAME メッシュが、SMIRK の 224 クロップではなくフルの生フレームの
+   正しいピクセルに落ちること — そうすれば `preprocess finalize` が切り出す
+   最終 512 頭部クロップで頭位置が正しくなる。
+2. 投影メッシュが画面上で正しい**サイズ**になること。
 
-We approximate orthographic with a perspective camera at large focal
-length. The math lives in `preprocess/smirk_convert.py::_build_t`, but
-the summary is:
+正射影は焦点距離の大きい透視投影で近似します。数式は
+`preprocess/smirk_convert.py::_build_t` にありますが、要約すると次のとおりです。
 
-- SMIRK's internal crop is a **similarity transform** `tform` from full
-  frame pixel → 224 crop pixel. The transform is isotropic; its scale
-  factor `s_ff = |tform[0,0]|` converts full-frame px to crop px.
-- SMIRK's `cam = [s, tx, ty]` places the FLAME origin at crop pixel
-  `(112 + 112*s*tx, 112 − 112*s*ty)` (y flipped inside SMIRK's
-  renderer).
-- Inverting `tform` gives the full-frame pixel of the FLAME origin.
-- Matching the apparent size: 1 FLAME unit projects to `s * 112` crop
-  pixels ⇒ `s * 112 / s_ff` full-frame pixels. For a perspective
-  camera with focal `f_px` at depth `Z`, 1 unit projects to `f_px / Z`
-  full-frame pixels. Equating, `Z = f_px * s_ff / (s * 112)`.
-- Finally `t = [(u_full − cx) * Z / f_px, (v_full − cy) * Z / f_px, Z]`
-  where `(cx, cy) = (W/2, H/2)`.
+- SMIRK の内部クロップはフルフレームピクセル → 224 クロップピクセルへの
+  **相似変換** `tform` です。等方であり、スケール係数
+  `s_ff = |tform[0,0]|` がフルフレーム px をクロップ px に変換します。
+- SMIRK の `cam = [s, tx, ty]` は FLAME 原点をクロップピクセル
+  `(112 + 112*s*tx, 112 − 112*s*ty)` に配置します（SMIRK のレンダラ内部で
+  y が反転される）。
+- `tform` を反転すれば、FLAME 原点のフルフレームピクセルが得られます。
+- 見かけサイズの一致：1 FLAME 単位は `s * 112` クロップピクセル
+  ⇒ `s * 112 / s_ff` フルフレームピクセルに投影されます。焦点 `f_px`・
+  奥行き `Z` の透視投影カメラでは 1 単位が `f_px / Z` フルフレームピクセルに
+  投影されるため、等式より `Z = f_px * s_ff / (s * 112)`。
+- 最後に `t = [(u_full − cx) * Z / f_px, (v_full − cy) * Z / f_px, Z]`、
+  ここで `(cx, cy) = (W/2, H/2)`。
 
-The `--focal-px` flag controls the perspective approximation: larger
-`f_px` → farther depth → closer to orthographic. The default `5000` is
-safe for head-only sequences in ~1k–4k resolution; bump to `10000` if
-you see noticeable "near-camera" distortion on the edge of the frame.
+`--focal-px` フラグが透視投影近似を制御します。`f_px` が大きいほど
+奥行きが遠くなり、正射影に近づきます。既定値 `5000` は ~1k〜4k 解像度の
+頭部のみのシーケンスで安全ですが、フレーム端で「近距離カメラ」的な歪みが
+目立つ場合は `10000` に上げてください。
 
-### Why this decouples from FlashAvatar's 512-crop
+### なぜ FlashAvatar の 512 クロップから切り離せるのか
 
-`preprocess finalize --crop` computes an **entirely different** square
-crop (the union of `*_neckhead.png` masks across the sequence, padded
-by `--crop-pad`) from the full raw frame. It then rewrites `opencv.K`
-and `img_size` in every `.frame` file to the final 512×512 view. We
-write SMIRK's `.frame` files at **full raw resolution** precisely so
-this downstream step works unchanged — the SMIRK internal 224 crop is
-invisible to FlashAvatar.
+`preprocess finalize --crop` はフルの生フレームから**まったく別の**正方
+クロップ（シーケンス全体の `*_neckhead.png` マスクの和集合に
+`--crop-pad` でパディング）を計算します。そのあと各 `.frame` の `opencv.K`
+と `img_size` を最終 512×512 ビューに書き換えます。SMIRK の `.frame`
+ファイルを**フル生解像度**で書き出しているのは、まさにこの下流処理を
+変更なしで動かすためです — SMIRK 内部の 224 クロップは FlashAvatar から
+見えません。
 
-## Caveats
+## 注意事項
 
-1. **SMIRK does not regress eye-ball rotation.** The default
-   `--eye-mode zero` writes identity eye pose for every frame, so the
-   trained avatar renders with static eyes. To get a gaze-tracking
-   avatar, pass `--eye-mode blendshapes`: eye rotation is then
-   synthesized from MediaPipe Face Landmarker ARKit blendshapes
-   captured in the same per-frame detection pass. The mapping follows
-   the ARKit → FLAME convention:
+1. **SMIRK は眼球の回転を回帰しません。** 既定の `--eye-mode zero` は全
+   フレームで恒等の目ポーズを書き込むため、学習後のアバターは固定目で
+   レンダリングされます。視線追従アバターにするには
+   `--eye-mode blendshapes` を指定してください。同じフレーム単位の検出
+   パスで取得される MediaPipe Face Landmarker の ARKit ブレンドシェイプ
+   から目の回転が合成されます。マッピングは ARKit → FLAME 規約に従います。
 
    - `left_pitch = (eyeLookDownLeft  - eyeLookUpLeft)  * 0.6 rad`
    - `left_yaw   = (eyeLookInLeft    - eyeLookOutLeft) * 0.6 rad`
    - `right_pitch = (eyeLookDownRight - eyeLookUpRight) * 0.6 rad`
-   - `right_yaw  = (eyeLookOutRight  - eyeLookInRight) * 0.6 rad` (mirrored)
-   - `axis_angle = [pitch, yaw, 0]` per eye -> `axis_angle_to_matrix` ->
-     `matrix_to_rotation_6d` (pytorch3d row convention, matching
-     `flame/lbs.py::rotation_6d_to_matrix`).
+   - `right_yaw  = (eyeLookOutRight  - eyeLookInRight) * 0.6 rad`（反転）
+   - 左右それぞれ `axis_angle = [pitch, yaw, 0]` → `axis_angle_to_matrix`
+     → `matrix_to_rotation_6d`（pytorch3d の行規約、
+     `flame/lbs.py::rotation_6d_to_matrix` と一致）。
 
-   `--eye-mode blendshapes` requires the `face_landmarker.task` file
-   that SMIRK's `quick_install.sh` downloads to
-   `external/smirk/assets/`. If the task file is missing, the runtime
-   falls back to the legacy `mp.solutions.face_mesh.FaceMesh` API (no
-   blendshape support) and silently degrades to identity eye pose — fix
-   with `bash external/smirk/quick_install.sh` and re-run. Eyelids
-   still come from SMIRK's own `eyelid_params` output regardless of
-   `--eye-mode`, not from the MediaPipe blink blendshapes.
-2. **SMIRK's weak-perspective camera is an approximation.** The
-   ortho→persp conversion produces negligible error when the head is
-   small relative to the image and the focal is large, but can
-   introduce a subtle scale bias vs metrical-tracker on short focal
-   lens / very close-up videos. Use `--verify-dir` to dump overlays
-   and inspect.
-3. **Per-frame shape jitter.** SMIRK regresses 300-dim shape
-   independently per frame; we collapse to the per-sequence median to
-   match metrical-tracker. If your sequence has a disguise / expression
-   change that meaningfully alters identity, increase `--shape-frames`
-   or pre-filter the first frames.
-4. **Expression dimension mismatch.** FlashAvatar was trained on the
-   upstream tracker's 100-dim expressions. SMIRK only regresses the
-   first 50 components; the remaining 50 are exactly zero. In practice
-   the first 50 components dominate, but convergence may be slightly
-   slower than with metrical-tracker output — consider training a few
-   thousand more iterations.
-5. **Requires a MediaPipe face detection in the very first frame.**
-   SMIRK has no bbox detector; we detect with MediaPipe and propagate
-   the last-good landmarks through frames where detection fails. If the
-   first frame has no face, the runner errors out — trim the video.
+   `--eye-mode blendshapes` には SMIRK の `quick_install.sh` が
+   `external/smirk/assets/` にダウンロードする `face_landmarker.task`
+   ファイルが必要です。このファイルが無い場合、ランタイムは
+   旧来の `mp.solutions.face_mesh.FaceMesh` API（ブレンドシェイプ非対応）
+   にフォールバックし、黙って恒等の目ポーズに劣化します。
+   `bash external/smirk/quick_install.sh` を再実行して直してください。
+   なお `--eye-mode` に関わらずまぶた (eyelids) は SMIRK 自身の
+   `eyelid_params` 出力から取得され、MediaPipe の瞬きブレンドシェイプは
+   使いません。
+2. **SMIRK の弱透視カメラは近似です。** 頭部が画像に対して小さく焦点が
+   長い場合、正射影→透視投影の変換誤差は無視できる程度ですが、短焦点・
+   近接撮影の動画では metrical-tracker と比べて微妙なスケールバイアスが
+   入ることがあります。`--verify-dir` でオーバーレイを出力して確認して
+   ください。
+3. **フレームごとの形状ジッタ。** SMIRK は 300 次元形状をフレームごとに
+   独立して回帰します。metrical-tracker に合わせてシーケンス単位の中央値に
+   畳み込んでいます。変装や表情変化でアイデンティティが大きく変わる
+   シーケンスでは、`--shape-frames` を増やすか、先頭フレームを事前に
+   フィルタリングしてください。
+4. **表情次元の不一致。** FlashAvatar は上流トラッカーの 100 次元表情で
+   学習されています。SMIRK は先頭 50 成分しか回帰せず、残り 50 は厳密に
+   ゼロです。実際には先頭 50 成分が支配的ですが、metrical-tracker 出力と
+   比べて収束が少し遅くなることがあります — 数千イテレーション追加学習を
+   検討してください。
+5. **最初のフレームで MediaPipe の顔検出が成功する必要があります。**
+   SMIRK にはバウンディングボックス検出器が無いので、こちらで MediaPipe
+   検出を行い、検出失敗フレームには直前の有効ランドマークを伝播します。
+   最初のフレームに顔が無いとランナーはエラー終了するため、動画を
+   トリミングしてください。
 
-## End-to-end SMIRK + FlashAvatar demo
+## SMIRK + FlashAvatar エンドツーエンドデモ
 
-A full run from a raw video to a trained avatar, using SMIRK as the
-FLAME tracker end-to-end. Replace `<idname>` with a stable identifier
-(e.g. the subject's name) and `path/to/clip.mp4` with your input video.
+生の動画から学習済みアバターまで、FLAME トラッカーとして SMIRK を使い
+端から端まで通す手順です。`<idname>` は安定した識別子（例：被写体名）に、
+`path/to/clip.mp4` は入力動画に置き換えてください。
 
-Prerequisites (once per machine):
+前提（マシンごとに 1 回だけ）：
 
 ```bash
-bash install_128.sh                              # FlashAvatar env
-bash scripts/setup_metrical_tracker.sh           # OPTIONAL — only if you
-                                                 # also want the default path
-bash scripts/setup_smirk.sh                      # SMIRK + FLAME + task file
-source .venv/bin/activate                        # activate from here on
+bash install_128.sh                              # FlashAvatar 環境
+bash scripts/setup_metrical_tracker.sh           # 任意 — 既定パスも使う
+                                                 # 場合だけ
+bash scripts/setup_smirk.sh                      # SMIRK + FLAME + task ファイル
+source .venv/bin/activate                        # ここ以降はアクティベート
 ```
 
-Step 1 — decode the input video into per-frame images, parsing masks,
-and matting alphas. This stage is identical regardless of which tracker
-you pick afterwards, and it's the only time the raw `.mp4` is touched —
-from Step 3 onward SMIRK iterates over the **image files** written
-here, never the video.
+ステップ 1 — 入力動画をフレームごとの画像、parsing マスク、matting アルファに
+デコードします。この段階は後でどのトラッカーを選んでも同じで、生の `.mp4`
+を触る唯一のタイミングです。ステップ 3 以降、SMIRK はここで書き出された
+**画像ファイル**を走査するだけで、動画そのものは触りません。
 
 ```bash
 python scripts/preprocess.py prepare \
     --idname <idname> --video path/to/clip.mp4
 ```
 
-Under the hood `prepare` runs three sub-stages and writes three
-parallel directories at the video's **native resolution** (a later
-`finalize` pass re-crops to 512×512):
+内部では `prepare` が 3 つのサブステージを実行し、動画の**ネイティブ解像度**で
+3 つの並列ディレクトリを書き出します（後段の `finalize` で 512×512 に再クロップ）。
 
-| Sub-stage | Tool | Output | First-run requirement |
+| サブステージ | ツール | 出力 | 初回要件 |
 |---|---|---|---|
-| `extract` | `ffmpeg` (must be on `PATH`) | `dataset/<idname>/raw/imgs/00001.jpg, 00002.jpg, …` | ffmpeg installed |
-| `parsing` | BiSeNet face-parsing | `dataset/<idname>/raw/parsing/*.png` (per-pixel class labels; `*_neckhead.png` = head+neck mask) | internet (weight auto-download via `gdown`) or `--bisenet-weights PATH` |
-| `matting` | RobustVideoMatting | `dataset/<idname>/raw/alpha/*.jpg` (soft foreground alpha) | internet (first `torch.hub.load`) |
+| `extract` | `ffmpeg`（`PATH` 上に必要） | `dataset/<idname>/raw/imgs/00001.jpg, 00002.jpg, …` | ffmpeg のインストール |
+| `parsing` | BiSeNet 顔パーシング | `dataset/<idname>/raw/parsing/*.png`（画素単位のクラスラベル。`*_neckhead.png` = 頭部+首マスク） | インターネット接続（`gdown` による重み自動ダウンロード）または `--bisenet-weights PATH` |
+| `matting` | RobustVideoMatting | `dataset/<idname>/raw/alpha/*.jpg`（ソフトな前景アルファ） | インターネット接続（初回の `torch.hub.load`） |
 
-Re-run selectively with `--skip-extract`, `--skip-parsing`, or
-`--skip-matting` once earlier sub-stages are cached. SMIRK's runtime
-(Step 3) reads `raw/imgs/*.jpg` in lexicographic order, so the 5-digit
-zero-padded filenames written here double as the frame IDs that
-`preprocess finalize` will re-key downstream.
+前段のサブステージがキャッシュされたら、`--skip-extract`・`--skip-parsing`・
+`--skip-matting` で選択的に再実行できます。SMIRK のランタイム（ステップ 3）
+は `raw/imgs/*.jpg` を辞書順に読み取るため、ここで書き込まれる 5 桁
+ゼロ埋めのファイル名がそのままフレーム ID となり、下流の
+`preprocess finalize` で再キーイングされます。
 
-### Pre-trim / normalise the clip with ffmpeg (optional but useful)
+### ffmpeg でクリップを事前にトリム／正規化する（任意だが有用）
 
-`prepare` extracts every single frame at the native fps and resolution,
-so any wasted frames get paid for three times (extract → parsing →
-matting → SMIRK encode). It's usually worth normalising the clip with
-ffmpeg before calling `prepare`. The SMIRK-specific constraint worth
-knowing: **MediaPipe must detect a face in the very first frame** to
-seed SMIRK's crop, so any leading blank / turned-away frames have to go:
+`prepare` はネイティブ fps・解像度で全フレームを抽出するため、無駄な
+フレームは 3 回（extract → parsing → matting → SMIRK エンコード）
+コストを払うことになります。`prepare` を呼ぶ前に ffmpeg でクリップを
+正規化する価値があります。SMIRK 特有の制約として、
+**MediaPipe が最初のフレームで顔を検出できる必要があります**（SMIRK の
+クロップを初期化するため）。したがって、先頭の空白フレームや後ろを向いた
+フレームは除去する必要があります。
 
 ```bash
-# Trim to the useful range (lossless, no re-encode):
+# 必要な範囲にトリム（再エンコードなしのロスレス）:
 ffmpeg -ss 00:00:10 -to 00:00:25 -i raw.mp4 -c copy trimmed.mp4
 
-# Downsample 60 fps → 30 fps to roughly halve pipeline runtime
-# with no meaningful loss of tracking quality:
+# 60 fps → 30 fps にダウンサンプル。トラッキング品質を実質損なわずに
+# パイプライン時間をおおよそ半減できる:
 ffmpeg -i raw.mp4 -vf fps=30 -c:v libx264 -pix_fmt yuv420p -an out.mp4
 
-# Downscale 4K → 1080p — anything past ~1080p is wasted work for
-# SMIRK's 224×224 internal crop:
+# 4K → 1080p にダウンスケール。SMIRK の 224×224 内部クロップに対して
+# ~1080p 超の解像度は無駄:
 ffmpeg -i raw.mp4 -vf "scale=-2:1080" -c:v libx264 -pix_fmt yuv420p -an out.mp4
 
-# Fix odd containers / pixel formats that ffmpeg-inside-prepare
-# struggles with:
+# prepare 内部の ffmpeg が苦手とする変なコンテナ／ピクセル形式を修正:
 ffmpeg -i weird.mov -c:v libx264 -pix_fmt yuv420p -an normalised.mp4
 ```
 
-See [`preprocessing.md`](preprocessing.md) for the full `prepare` flag
-reference (`--bisenet-weights`, `--rvm-variant`, the per-stage skips,
-and the exact file-naming contract).
+`prepare` のフラグ一覧（`--bisenet-weights`・`--rvm-variant`・各ステージの
+スキップ、正確なファイル命名契約）は
+[`preprocessing.md`](preprocessing.md) を参照してください。
 
-Step 2 *(optional but recommended on shaky hand-held clips)* — tag the
-blurriest frames so `train.py` / `test.py` can skip them without
-deleting any data:
+ステップ 2 *（任意。手持ち撮影のブレが多いクリップで推奨）* — 最もブレの
+大きいフレームにタグを付け、データを削除せずに `train.py` / `test.py`
+でスキップできるようにします。
 
 ```bash
 python scripts/preprocess.py filter-blur --idname <idname> --percentile 15
-# writes dataset/<idname>/raw/keep_list.txt + blur_preview.jpg
+# dataset/<idname>/raw/keep_list.txt と blur_preview.jpg を書き出す
 ```
 
-Step 3 — run SMIRK to produce `.frame` files. This is the step that
-differs from the default pipeline: a single feed-forward pass per frame
-instead of per-frame metrical-tracker optimization. Writes
-`metrical-tracker/output/<idname>/checkpoint_raw/*.frame`:
+ステップ 3 — SMIRK を実行して `.frame` ファイルを生成します。これが
+既定パイプラインとの唯一の相違点です。フレームごとの metrical-tracker
+最適化ではなく、フレームごとに 1 回のフィードフォワード推論を行います。
+出力先は `metrical-tracker/output/<idname>/checkpoint_raw/*.frame` です。
 
 ```bash
 bash scripts/run_tracker.sh <idname> --smirk \
     --verify-dir dataset/<idname>/smirk_verify
-# equivalent forms:
+# 等価な書き方:
 #   bash scripts/run_smirk_tracker.sh <idname> --verify-dir ...
 #   python scripts/preprocess.py smirk --idname <idname> --verify-dir ...
 ```
 
-**To enable eye tracking, add `--eye-mode blendshapes`.** This is the
-step that switches the trained avatar from "static eyes" to "follows
-the subject's gaze":
+**視線追従を有効化するには `--eye-mode blendshapes` を追加します。**
+これが学習済みアバターを「固定目」から「被写体の視線を追う」へ切り替える
+ステップです。
 
 ```bash
 bash scripts/run_tracker.sh <idname> --smirk --eye-mode blendshapes \
     --verify-dir dataset/<idname>/smirk_verify
 ```
 
-With `--eye-mode blendshapes`, the SMIRK runtime additionally captures
-MediaPipe Face Landmarker ARKit blendshape coefficients
-(`eyeLookInLeft`, `eyeLookOutLeft`, `eyeLookUpLeft`, `eyeLookDownLeft`
-and the right-eye counterparts) on every frame, converts them to
-per-eye axis-angle rotations, packs them as `(1, 12)` pytorch3d rot6d,
-and writes them into `flame.eyes` of each `.frame`. FlashAvatar's
-deform MLP (`src/deform_model.py`) and FLAME LBS
-(`flame/flame_mica.py`) both consume that tensor, so the final
-rendered avatar will move its eyes in sync with the input clip.
+`--eye-mode blendshapes` を指定すると、SMIRK ランタイムは各フレームで
+MediaPipe Face Landmarker の ARKit ブレンドシェイプ係数
+(`eyeLookInLeft`・`eyeLookOutLeft`・`eyeLookUpLeft`・`eyeLookDownLeft`
+および右目対応物) も追加取得し、左右の軸角回転に変換してから
+`(1, 12)` の pytorch3d rot6d にパックし、各 `.frame` の `flame.eyes`
+に書き込みます。FlashAvatar のデフォーム MLP (`src/deform_model.py`) と
+FLAME LBS (`flame/flame_mica.py`) はいずれもこのテンソルを消費するため、
+最終レンダリング結果は入力クリップと同期して目が動きます。
 
-Without the flag (default `--eye-mode zero`), `flame.eyes` is identity
-rot6d × 2 and the avatar's eyes stay locked straight ahead — use this
-when you don't need gaze motion or want to ablate the blendshape
-signal.
+このフラグを付けない（既定の `--eye-mode zero`）と `flame.eyes` は
+恒等 rot6d × 2 となり、アバターの目は正面を向いたまま固定されます。
+視線モーションが不要な場合や、ブレンドシェイプ信号を切って比較したい
+場合に使います。
 
-`--eye-mode blendshapes` depends on `external/smirk/assets/face_landmarker.task`,
-which SMIRK's `quick_install.sh` (run automatically by
-`scripts/setup_smirk.sh`) downloads. A startup log line from the SMIRK
-runtime confirms which MediaPipe backend is active — if you see
-`face_landmarker.task not found`, re-run
-`bash external/smirk/quick_install.sh` before the tracker step.
+`--eye-mode blendshapes` は `external/smirk/assets/face_landmarker.task`
+に依存します（SMIRK の `quick_install.sh` がダウンロードし、
+`scripts/setup_smirk.sh` 内で自動実行されます）。SMIRK ランタイムの
+起動ログ行がどの MediaPipe バックエンドがアクティブかを示します。
+`face_landmarker.task not found` が出ていたら、トラッカーステップの前に
+`bash external/smirk/quick_install.sh` を再実行してください。
 
-Inspect `dataset/<idname>/smirk_verify/stats.csv` and the
-`overlay_*.jpg` renders — a median reprojection error around 10 px on a
-1080p clip means SMIRK's camera is well-aligned with FlashAvatar's. If
-the median is >20 px, bump `--focal-px` (e.g. `--focal-px 8000`) and
-re-run.
+`dataset/<idname>/smirk_verify/stats.csv` と `overlay_*.jpg` を
+確認してください。1080p クリップでランドマーク再投影誤差の中央値が
+10 px 程度であれば、SMIRK のカメラが FlashAvatar とよく揃っています。
+中央値が 20 px を超える場合は `--focal-px` を増やして（例：
+`--focal-px 8000`）再実行してください。
 
-Re-running this step with a different `--eye-mode` is cheap — the
-`.frame` files are rewritten in place, and steps 4-6 below are
-identical. Pass `--overwrite` to force regeneration:
+`--eye-mode` を変えてこのステップを再実行するのは安価です。
+`.frame` ファイルはその場で書き換えられ、以降のステップ 4〜6 は
+同一です。強制再生成するには `--overwrite` を指定します。
 
 ```bash
 bash scripts/run_tracker.sh <idname> --smirk \
     --eye-mode blendshapes --overwrite
 ```
 
-Step 4 — finalize: head-centred 512×512 crop + K / `img_size`
-rewrite. Identical regardless of tracker:
+ステップ 4 — finalize：頭部中心 512×512 クロップ + K / `img_size`
+書き換え。どのトラッカーでも同じです。
 
 ```bash
 python scripts/preprocess.py finalize --idname <idname>
-# writes dataset/<idname>/{imgs,parsing,alpha}/ and
-# metrical-tracker/output/<idname>/checkpoint/ (re-keyed .frame files)
+# dataset/<idname>/{imgs,parsing,alpha}/ と
+# metrical-tracker/output/<idname>/checkpoint/ (再キーイング済み .frame) を書き出す
 ```
 
-Step 5 — train. FlashAvatar's `train.py` consumes the `.frame` files
-exactly as it would from metrical-tracker:
+ステップ 5 — 学習。FlashAvatar の `train.py` は metrical-tracker 由来の
+場合とまったく同じように `.frame` を消費します。
 
 ```bash
 python train.py --idname <idname>
-# checkpoints under logs/<idname>/.
+# チェックポイントは logs/<idname>/ 配下に出力。
 ```
 
-Step 6 — render the test split with the trained checkpoint:
+ステップ 6 — 学習済みチェックポイントでテスト分割をレンダリング。
 
 ```bash
 python test.py --idname <idname>
-# writes logs/<idname>/test.avi (every frame by default).
+# logs/<idname>/test.avi に書き出す（既定では全フレーム）。
 ```
 
-That's the full loop. Eye-tracking sanity check: if you trained with
-`--eye-mode blendshapes` and the rendered avatar's eyes visibly follow
-the subject's gaze, the blendshape-derived `eyes_pose` has fed through
-the deform MLP + FLAME LBS as intended. If the eyes are locked straight
-ahead even though the input clip shows gaze motion, either you trained
-with the default `--eye-mode zero` (re-run step 3 with
-`--eye-mode blendshapes --overwrite`, then steps 4-6) or
-`face_landmarker.task` is missing from `external/smirk/assets/` (check
-the `[smirk/runtime]` startup log line and re-run
-`bash external/smirk/quick_install.sh`).
+以上がフルループです。視線追従のサニティチェック：
+`--eye-mode blendshapes` で学習した結果、レンダリングされたアバターの目が
+被写体の視線に追従していれば、ブレンドシェイプから導出した `eyes_pose` が
+デフォーム MLP と FLAME LBS を通って意図どおり伝わっています。入力クリップ
+では視線が動いているのに目が正面固定で出力される場合は、既定の
+`--eye-mode zero` で学習したか（ステップ 3 を
+`--eye-mode blendshapes --overwrite` で再実行し、ステップ 4〜6 を
+やり直す）、`external/smirk/assets/` に `face_landmarker.task` が無い
+かのどちらかです（`[smirk/runtime]` の起動ログを確認し、
+`bash external/smirk/quick_install.sh` を再実行してください）。
 
-### Minimal one-liner (for batch jobs)
+### 最小ワンライナー（バッチジョブ用）
 
-Without gaze tracking (static-eye avatar):
+視線追従なし（固定目アバター）：
 
 ```bash
 source .venv/bin/activate && \
@@ -347,7 +341,7 @@ source .venv/bin/activate && \
   python test.py  --idname $ID
 ```
 
-With gaze tracking (add `--eye-mode blendshapes` to the tracker step):
+視線追従あり（トラッカーステップに `--eye-mode blendshapes` を追加）：
 
 ```bash
 source .venv/bin/activate && \
@@ -358,71 +352,70 @@ source .venv/bin/activate && \
   python test.py  --idname $ID
 ```
 
-## Running SMIRK's own demos (optional smoke test)
+## SMIRK 自体のデモを動かす（任意のスモークテスト）
 
-`scripts/setup_smirk.sh` clones SMIRK into `external/smirk/`. Once it
-finishes, you can run SMIRK's upstream demos directly from that checkout
-to confirm the install is healthy, independently of FlashAvatar's
-pipeline. These demos render an overlay / video so you can eyeball the
-tracking quality before committing to a full FlashAvatar run.
+`scripts/setup_smirk.sh` は SMIRK を `external/smirk/` にクローンします。
+完了後は、FlashAvatar のパイプラインとは独立に、そのチェックアウトから
+直接 SMIRK 上流のデモを実行してインストールの健全性を確認できます。
+これらのデモはオーバーレイや動画をレンダリングするので、FlashAvatar の
+フル実行に入る前にトラッキング品質を目視チェックできます。
 
-All demos run in the *same* active FlashAvatar venv — no separate env
-switch needed (see "Environment compatibility" below).
+すべてのデモは*同じ*アクティブな FlashAvatar venv で動作します — 別環境
+への切り替えは不要です（後述「環境互換性」を参照）。
 
 ```bash
 source .venv/bin/activate
 cd external/smirk
 
-# (first time only) fetch a small bundle of sample videos for the demos
+# （初回のみ）デモ用のサンプル動画バンドルを取得
 bash prepare_demos.sh
 
-# Single image -> FLAME overlay + a rendered image
+# 単一画像 -> FLAME オーバーレイ + レンダリング画像
 bash demos/run_demo.sh --input_path samples/test_image2.png --crop
-#   writes external/smirk/output/ ... (see SMIRK's README for flags)
+#   external/smirk/output/ ... に書き出し（フラグは SMIRK の README 参照）
 
-# Video -> overlay video
+# 動画 -> オーバーレイ動画
 bash demos/run_demo_video.sh --input_path samples/dafoe.mp4 --crop
-#   writes external/smirk/output/dafoe/dafoe.mp4
+#   external/smirk/output/dafoe/dafoe.mp4 に書き出し
 
-# Video -> raw FLAME parameters (.pt dict, no rendering)
+# 動画 -> 生の FLAME パラメータ（.pt 辞書、レンダリングなし）
 bash demos/run_demo_save_flame.sh --input_path samples/dafoe.mp4 --crop
-#   writes external/smirk/output/dafoe/dafoe.pt
+#   external/smirk/output/dafoe/dafoe.pt に書き出し
 ```
 
-Common useful flags (forwarded by the `.sh` wrappers to the underlying
-`demos/demo*.py`):
+よく使うフラグ（`.sh` ラッパが内部の `demos/demo*.py` に転送）：
 
-| Flag | Purpose |
+| フラグ | 用途 |
 |---|---|
-| `--crop` | Use MediaPipe to auto-crop faces (match what FlashAvatar's SMIRK path does). Omit only if your inputs are already face-cropped. |
-| `--mp_delegate {cpu,gpu}` | Where to run MediaPipe face detection. `gpu` is faster on CUDA boxes but needs the MediaPipe GPU delegate (default fallback is CPU). |
-| `--with_eye_pose` | (save_flame only) Also derive eye rot6d + eyelids from MediaPipe blendshapes and pack them into the output .pt. Independent of FlashAvatar. |
-| `--batch_size N` | Batch size for encoder inference. |
-| `--benchmark` | Print per-stage timing. |
+| `--crop` | MediaPipe で顔を自動クロップ（FlashAvatar の SMIRK パスと同じ挙動）。入力が既に顔クロップ済みの場合だけ省略。 |
+| `--mp_delegate {cpu,gpu}` | MediaPipe 顔検出の実行場所。`gpu` は CUDA マシンで高速だが MediaPipe の GPU デリゲートが必要（既定のフォールバックは CPU）。 |
+| `--with_eye_pose` | （save_flame 専用）MediaPipe ブレンドシェイプから目の rot6d とまぶたも導出し、出力 .pt に含める。FlashAvatar とは無関係。 |
+| `--batch_size N` | エンコーダ推論のバッチサイズ。 |
+| `--benchmark` | 段階ごとのタイミングを表示。 |
 
-**Note**: these demos are SMIRK's own tooling; their output format
-(`.pt` dicts with `shape/exp/pose/cam/...` per frame) is **different
-from** FlashAvatar's `.frame` format. To feed SMIRK into FlashAvatar,
-use `scripts/run_smirk_tracker.sh` (or `preprocess smirk`) — which
-invokes SMIRK's encoder programmatically and performs the .frame
-conversion described above. Running SMIRK's demos is strictly a sanity
-check, not a replacement for the integration script.
+**注意**：これらのデモは SMIRK 自身のツール類で、その出力形式
+（フレームごとの `shape/exp/pose/cam/...` を持つ `.pt` 辞書）は
+FlashAvatar の `.frame` 形式とは**異なります**。SMIRK を FlashAvatar に
+流し込むには、`scripts/run_smirk_tracker.sh`（または `preprocess smirk`）
+を使ってください。これが SMIRK エンコーダをプログラム的に呼び出し、
+上述の `.frame` 変換を行います。SMIRK のデモ実行はあくまでサニティ
+チェックであり、統合スクリプトの代わりにはなりません。
 
-Trouble-shooting:
+トラブルシューティング：
 
-- `ModuleNotFoundError: src.smirk_encoder` when running a demo → you
-  left the `external/smirk/` directory before invoking; `cd` back.
-- `FileNotFoundError: .../SMIRK_em1.pt` → `quick_install.sh` didn't
-  complete; re-run `bash external/smirk/quick_install.sh`.
-- Poor tracking on a specific face → try `--scale 1.6` in
-  `demo_video.py` for a looser crop, or provide your own bbox.
+- デモ実行時に `ModuleNotFoundError: src.smirk_encoder` → 実行前に
+  `external/smirk/` ディレクトリを出ています。`cd` で戻ってください。
+- `FileNotFoundError: .../SMIRK_em1.pt` → `quick_install.sh` が未完了。
+  `bash external/smirk/quick_install.sh` を再実行してください。
+- 特定の顔でトラッキングが悪い → `demo_video.py` で `--scale 1.6` にして
+  クロップを緩めるか、独自のバウンディングボックスを与えてください。
 
-See `external/smirk/README.md` for the full flag reference.
+フラグの全リファレンスは `external/smirk/README.md` を参照してください。
 
-## Environment compatibility with FlashAvatar
+## FlashAvatar との環境互換性
 
-The cuda128 branch of SMIRK is deliberately pin-aligned with
-FlashAvatar's install_128.sh:
+SMIRK の cuda128 ブランチは、FlashAvatar の install_128.sh と意図的に
+ピンを揃えています。
 
 | | FlashAvatar `install_128.sh` | SMIRK `external/smirk/install_128.sh` |
 |---|---|---|
@@ -430,71 +423,74 @@ FlashAvatar's install_128.sh:
 | CUDA   | 12.8 | 12.8 |
 | PyTorch | 2.9.1 | 2.9.1 |
 | numpy  | 2.2.6 | 2.2.6 |
-| chumpy | `git+mattloper/chumpy@main` (numpy 2 compat) | same |
+| chumpy | `git+mattloper/chumpy@main`（numpy 2 対応） | 同じ |
 
-SMIRK-only extras that `setup_smirk.sh` pulls in:
-`timm`, `albumentations`, `mediapipe`, `scikit-image`, and
-`pytorch_lightning` (optional, inference code tolerates its absence).
-None of these are on FlashAvatar's critical path; installing them does
-not alter the torch / pytorch3d / diff_gaussian_rasterization /
-simple_knn builds that `install_128.sh` produced.
+`setup_smirk.sh` が追加で入れる SMIRK 専用の依存：
+`timm`・`albumentations`・`mediapipe`・`scikit-image`・
+`pytorch_lightning`（任意。推論コードはこれが無くても動作）。
+いずれも FlashAvatar のクリティカルパスにはありません。これらの
+インストールは `install_128.sh` がビルドした torch / pytorch3d /
+diff_gaussian_rasterization / simple_knn を変更しません。
 
-The integration runs *both* SMIRK and FlashAvatar in a **single shared
-venv** — there is no second environment to activate. The SMIRK code
-itself is loaded via `sys.path.insert(0, external)` at import time
-(see `preprocess/smirk_tracker._ensure_on_pythonpath`) and imported as
-`smirk.src.smirk_encoder`, so the cloned repo doesn't need to be
-pip-installed as a package. Going via the `smirk.*` dotted path keeps
-SMIRK's internal `src/` out of FlashAvatar's own top-level `src/`
-namespace, which would otherwise shadow it.
+この統合では SMIRK と FlashAvatar を**単一の共有 venv** で動かします — 
+もう一つ別の環境をアクティベートする必要はありません。SMIRK のコード
+自体はインポート時に `sys.path.insert(0, external)` 経由で読み込まれ
+（`preprocess/smirk_tracker._ensure_on_pythonpath` 参照）、
+`smirk.src.smirk_encoder` としてインポートされるため、クローンしたリポジトリを
+パッケージとして pip インストールする必要はありません。`smirk.*`
+ドット付きパス経由にしているのは、SMIRK 内部の `src/` が
+FlashAvatar 自身のトップレベル `src/` 名前空間をシャドーしないようにする
+ためです。
 
-`setup_smirk.sh` runs a post-install sanity check that verifies the
-key imports are still intact (`torch`, `pytorch3d`,
-`diff_gaussian_rasterization`, `simple_knn`, and SMIRK's
-`smirk.src.smirk_encoder`). If you ever see a failure there, something
-in SMIRK's install chain downgraded a shared package — report the diff
-and we'll fix the pin.
+`setup_smirk.sh` はインストール後のサニティチェックを実行し、主要な
+インポート（`torch`・`pytorch3d`・`diff_gaussian_rasterization`・
+`simple_knn`、および SMIRK の `smirk.src.smirk_encoder`）が無傷である
+ことを検証します。ここで失敗する場合、SMIRK 側のインストール連鎖で
+共有パッケージがダウングレードされています — 差分を報告してもらえれば
+ピンを修正します。
 
-Known non-conflicts (paranoia list):
+既知の非衝突（念のためリスト）：
 
-- `mediapipe` is installed by both metrical-tracker's
-  `setup_metrical_tracker.sh` and SMIRK's installer. Both pin the same
-  line (0.10.x); whichever runs last wins, but both work.
-- `chumpy` is installed from GitHub main by both FlashAvatar and
-  SMIRK. Re-running either is idempotent (pip detects the same
-  commit).
-- `pytorch_lightning` is only a SMIRK-side dep and does NOT pull a
-  different torch; FlashAvatar never imports it.
+- `mediapipe` は metrical-tracker の `setup_metrical_tracker.sh` と
+  SMIRK のインストーラの両方からインストールされます。どちらも同じ
+  系列（0.10.x）をピンしており、後から走った方が勝ちますが、どちらでも
+  動作します。
+- `chumpy` は FlashAvatar と SMIRK の両方が GitHub main から
+  インストールします。どちらを再実行してもべき等です（pip が同一
+  コミットを検出）。
+- `pytorch_lightning` は SMIRK 側の依存のみで、別の torch を引き込み
+  ません。FlashAvatar は一切インポートしません。
 
-## Verifying the output
+## 出力の検証
 
-Pass `--verify-dir PATH` to `preprocess smirk` (or via the shell
-wrappers with `--verify-dir ...`) to dump:
+`preprocess smirk`（またはシェルラッパ経由の `--verify-dir ...`）に
+`--verify-dir PATH` を渡すと次を書き出します。
 
-- `verify/stats.csv` — per-frame detection flag, landmark reprojection
-  error (px), crop bbox size.
-- `verify/overlay_XXXXX.jpg` — a handful of sample frames with the
-  FLAME mesh points projected via the synthesized `K/R/t`. Look for:
-  - Projected points centred on the face (a gross offset means the R
-    y-flip / t sign is wrong).
-  - Projected mesh size matching the face size (wrong `Z` shows up as
-    an over-/under-scaled mesh).
+- `verify/stats.csv` — フレームごとの検出フラグ、ランドマーク再投影
+  誤差 (px)、クロップ bbox サイズ。
+- `verify/overlay_XXXXX.jpg` — 合成した `K/R/t` で FLAME メッシュ点を
+  投影した数フレームのサンプル。確認ポイント：
+  - 投影点が顔の中心にあること（大きくずれている場合は R の y 反転か
+    t の符号が誤り）。
+  - 投影メッシュのサイズが顔のサイズに合っていること（`Z` が誤ると
+    メッシュが拡大/縮小されて現れる）。
 
-A median reprojection error below ~10 px on a 1080p input is "looks
-correct"; above ~20 px triggers a warning and usually means the
-ortho→persp depth estimate needs a larger `--focal-px`.
+1080p 入力で再投影誤差の中央値が ~10 px 以下であれば「正しそう」、
+~20 px を超えると警告が出て、通常は正射影→透視投影の深度推定に
+もっと大きな `--focal-px` が必要であることを意味します。
 
-## Relation to the existing install / pipeline
+## 既存のインストール／パイプラインとの関係
 
-- `install_128.sh` → unchanged. FlashAvatar's own env is not touched.
-- `scripts/setup_metrical_tracker.sh` → unchanged, still the default.
-- `scripts/setup_smirk.sh` → new, optional. Runs SMIRK's own
-  `install_128.sh` + `quick_install.sh` (which share FlashAvatar's pin
-  set) inside the active env.
-- `scripts/run_tracker.sh` → now accepts `--smirk` and dispatches to
-  `run_smirk_tracker.sh`. Default (no flag) is unchanged: metrical-tracker.
-- `preprocess finalize` / training code → unchanged. Consumes the same
-  `.frame` format.
+- `install_128.sh` → 変更なし。FlashAvatar 自身の環境には手を入れません。
+- `scripts/setup_metrical_tracker.sh` → 変更なし。依然として既定。
+- `scripts/setup_smirk.sh` → 新規、オプション。アクティブ環境の中で
+  SMIRK 自身の `install_128.sh` + `quick_install.sh`
+  （FlashAvatar のピンセットを共有）を実行します。
+- `scripts/run_tracker.sh` → `--smirk` を受け付け、`run_smirk_tracker.sh`
+  にディスパッチするようになりました。フラグなしの既定動作は従来どおり
+  metrical-tracker です。
+- `preprocess finalize` と学習コード → 変更なし。同じ `.frame` 形式を
+  消費します。
 
-The net external impact on an existing FlashAvatar tree that does NOT
-opt into SMIRK is zero: no new deps, no behaviour changes.
+SMIRK を使わない既存の FlashAvatar ツリーへの外部影響はゼロです：
+新規依存ゼロ、挙動変化ゼロ。
