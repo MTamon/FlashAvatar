@@ -393,16 +393,19 @@ simple_knn builds that `install_128.sh` produced.
 
 The integration runs *both* SMIRK and FlashAvatar in a **single shared
 venv** — there is no second environment to activate. The SMIRK code
-itself is loaded via `sys.path.insert(0, external/smirk)` at import
-time (see `preprocess/smirk_tracker._ensure_on_pythonpath`) so the
-cloned repo doesn't need to be pip-installed as a package.
+itself is loaded via `sys.path.insert(0, external)` at import time
+(see `preprocess/smirk_tracker._ensure_on_pythonpath`) and imported as
+`smirk.src.smirk_encoder`, so the cloned repo doesn't need to be
+pip-installed as a package. Going via the `smirk.*` dotted path keeps
+SMIRK's internal `src/` out of FlashAvatar's own top-level `src/`
+namespace, which would otherwise shadow it.
 
 `setup_smirk.sh` runs a post-install sanity check that verifies the
 key imports are still intact (`torch`, `pytorch3d`,
 `diff_gaussian_rasterization`, `simple_knn`, and SMIRK's
-`src.smirk_encoder`). If you ever see a failure there, something in
-SMIRK's install chain downgraded a shared package — report the diff and
-we'll fix the pin.
+`smirk.src.smirk_encoder`). If you ever see a failure there, something
+in SMIRK's install chain downgraded a shared package — report the diff
+and we'll fix the pin.
 
 Known non-conflicts (paranoia list):
 

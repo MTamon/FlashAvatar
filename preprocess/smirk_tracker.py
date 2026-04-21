@@ -103,12 +103,16 @@ def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
 
 
 def _ensure_on_pythonpath(smirk_root: Path) -> None:
-    """Add `external/smirk` AND this package's `preprocess/_smirk/` to sys.path.
+    """Add `external/` AND this package's `preprocess/_smirk/` to sys.path.
 
-    The SMIRK repo ships as a loose `src/` tree; we put the smirk root on the
-    path so `from src.smirk_encoder import SmirkEncoder` works. The runtime /
-    convert / verify helpers live under this package so users don't have to
-    install FlashAvatar to run the tracker.
+    SMIRK ships as a proper `smirk` package (MTamon/smirk@release/cuda128
+    has `external/smirk/__init__.py` and `external/smirk/src/__init__.py`),
+    so we put the *parent* of the SMIRK clone on sys.path and import it
+    as `smirk.src.smirk_encoder`. Going via `smirk.src.*` sidesteps the
+    FlashAvatar top-level `src/` package (which would otherwise shadow a
+    bare `src.X` import). The runtime / convert / verify helpers live
+    under `preprocess/_smirk/` so users don't have to pip-install
+    FlashAvatar to run the tracker.
     """
     smirk_root = Path(smirk_root).resolve()
     if not (smirk_root / "src" / "smirk_encoder.py").is_file():
@@ -116,9 +120,16 @@ def _ensure_on_pythonpath(smirk_root: Path) -> None:
             f"SMIRK not found at {smirk_root} (missing src/smirk_encoder.py).\n"
             f"Run scripts/setup_smirk.sh to clone + install it."
         )
-    p = str(smirk_root)
-    if p not in sys.path:
-        sys.path.insert(0, p)
+    if not (smirk_root / "__init__.py").is_file() or \
+       not (smirk_root / "src" / "__init__.py").is_file():
+        raise RuntimeError(
+            f"SMIRK checkout at {smirk_root} is missing __init__.py — you're "
+            f"on an old SMIRK revision. Update with:\n"
+            f"    (cd {smirk_root} && git pull --ff-only origin release/cuda128)"
+        )
+    parent = str(smirk_root.parent)
+    if parent not in sys.path:
+        sys.path.insert(0, parent)
     # Also expose our private runtime module.
     here = Path(__file__).resolve().parent / "_smirk"
     if str(here) not in sys.path:

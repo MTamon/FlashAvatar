@@ -49,7 +49,12 @@ class SmirkRunner:
         self._prev_blendshapes: dict = {}
 
     def _load_encoder(self) -> None:
-        from src.smirk_encoder import SmirkEncoder  # type: ignore
+        # SMIRK (MTamon/smirk@release/cuda128) ships as a proper `smirk`
+        # package with `smirk/__init__.py` and `smirk/src/__init__.py`, so
+        # we import via the dotted path. `_ensure_on_pythonpath` puts the
+        # parent of the SMIRK clone on sys.path, which keeps us out of
+        # FlashAvatar's own top-level `src/` namespace.
+        from smirk.src.smirk_encoder import SmirkEncoder  # type: ignore
         enc = SmirkEncoder().to(self.device).eval()
         ckpt = torch.load(str(self.cfg.checkpoint), map_location=self.device,
                           weights_only=False)
