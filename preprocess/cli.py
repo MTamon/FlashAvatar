@@ -162,6 +162,14 @@ def build_argparser() -> argparse.ArgumentParser:
     sm.add_argument("--shape-frames", type=int, default=150,
                     help="Canonicalize FLAME identity across the first N "
                          "detected frames (median).")
+    sm.add_argument("--eye-mode", choices=["blendshapes", "zero"],
+                    default="blendshapes",
+                    help="Source of FLAME eye_pose. 'blendshapes' (default) "
+                         "derives per-eye yaw/pitch from MediaPipe Face "
+                         "Landmarker ARKit blendshapes (eyeLookIn/Out/Up/Down*) "
+                         "— requires face_landmarker.task from "
+                         "SMIRK's quick_install.sh. 'zero' writes identity, "
+                         "matching the pre-eye-pose behaviour.")
     sm.add_argument("--verify-dir", type=Path, default=None,
                     help="If set, dump landmark reprojection stats + overlay "
                          "JPEGs to this directory for sanity check.")
@@ -349,6 +357,7 @@ def cmd_smirk(args: argparse.Namespace) -> int:
         shape_frames=args.shape_frames,
         batch_size=args.batch_size,
         overwrite=args.overwrite,
+        eye_mode=args.eye_mode,
     )
     print(f"[smirk] {raw_imgs} -> {ckpt_raw}")
     n = smirk_mod.run(cfg, raw_imgs, ckpt_raw,

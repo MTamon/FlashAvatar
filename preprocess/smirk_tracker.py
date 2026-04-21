@@ -38,6 +38,10 @@ class SmirkConfig:
     shape_frames: int = 150          # canonicalize shape over this many frames
     batch_size: int = 8
     overwrite: bool = False
+    # Eye pose source: "blendshapes" (default, derives eye rotation from
+    # MediaPipe Face Landmarker ARKit blendshape coefficients) or "zero"
+    # (identity eye pose for every frame; matches the pre-0.2 behaviour).
+    eye_mode: str = "blendshapes"
 
 
 def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
@@ -85,7 +89,7 @@ def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
             continue
         frame_dict = to_flashavatar_frame(
             p.result, shape=shape, img_size=img_size,
-            focal_px=cfg.focal_px,
+            focal_px=cfg.focal_px, eye_mode=cfg.eye_mode,
         )
         torch.save(frame_dict, dst)
         n_written += 1

@@ -4,7 +4,10 @@ Handles the five awkward impedance mismatches between SMIRK and FlashAvatar:
 
 1. Expression dim (50 vs 100)      -> zero-pad last 50
 2. Jaw representation (aa vs 6D)   -> axis_angle_to_matrix -> matrix_to_rot6d
-3. Eye pose                        -> SMIRK produces none, default identity 6D x2
+3. Eye pose                        -> SMIRK produces none; we derive it from
+                                      MediaPipe Face Landmarker blendshapes
+                                      (`eye-mode blendshapes`, default) or
+                                      write identity (`eye-mode zero`).
 4. Global pose (aa + OpenGL)       -> rot matrix, then diag(1,-1,-1) y/z flip
                                       for OpenCV (y-down, +z forward) convention
 5. Camera (weak-persp in 224 crop) -> perspective K/R/t at FULL raw frame res
@@ -57,18 +60,33 @@ def to_flashavatar_frame(
     shape: np.ndarray,
     img_size: tuple[int, int],
     focal_px: float,
+    eye_mode: str = "blendshapes",
 ) -> dict:
     """Build the dict saved as `.frame` by `torch.save`.
 
     `img_size` is (W, H) of the full raw frame; `shape` is the canonicalized
-    300-dim FLAME identity.
+    300-dim FLAME identity. `eye_mode` is one of:
+
+      "blendshapes" (default) — derive eye_pose from MediaPipe Face
+                                Landmarker ARKit-style blendshape coefficients
+                                captured alongside each frame's detection.
+      "zero"                  — write identity eye pose (legacy behaviour).
+
+    Falls back to identity whenever blendshapes are unavailable for a frame,
+    so callers never need to special-case missing detections.
     """
     w, h = img_size
 
     # --- FLAME params --------------------------------------------------
     shape_100 = _pad_expression(r.expression_params, 100)   # (100,)
     jaw_6d = _axis_angle_to_rot6d(r.jaw_params)             # (6,)
-    eyes_12 = _default_eye_pose_6d()                         # (12,)
+    if eye_mode == "blendshapes":
+        eyes_12 = eye_pose_6d_from_blendshapes(r.blendshapes)
+    elif eye_mode == "zero":
+        eyes_12 = _default_eye_pose_6d()
+    else:
+        raise ValueError(f"unknown eye_mode: {eye_mode!r}; "
+                         "expected 'blendshapes' or 'zero'.")
     flame_dict = {
         "shape": torch.from_numpy(shape).float().unsqueeze(0),       # (1, 300)
         "exp": torch.from_numpy(shape_100).float().unsqueeze(0),     # (1, 100)
@@ -120,13 +138,60 @@ def _axis_angle_to_rot6d(aa: np.ndarray) -> np.ndarray:
 
 
 def _default_eye_pose_6d() -> np.ndarray:
-    # SMIRK does not regress eye-ball rotation. We write identity 6D
-    # rotation (first two columns of I_3: [1,0,0, 0,1,0]) for each eye.
-    # FlashAvatar's deform MLP still consumes `eyes_pose`, so the avatar
-    # will render with static eyes. Live eye tracking on top of SMIRK is
-    # out of scope for this tracker.
+    # Identity 6D per eye in pytorch3d's row convention (first two rows of
+    # I_3: [1,0,0, 0,1,0]). `rotation_6d_to_matrix` reconstructs I exactly.
     eye = np.array([1, 0, 0, 0, 1, 0], dtype=np.float32)
     return np.concatenate([eye, eye], axis=0)
+
+
+# ARKit blendshape names consumed by `eye_pose_6d_from_blendshapes`.
+_ARKIT_EYE_KEYS = (
+    "eyeLookUpLeft", "eyeLookDownLeft", "eyeLookInLeft", "eyeLookOutLeft",
+    "eyeLookUpRight", "eyeLookDownRight", "eyeLookInRight", "eyeLookOutRight",
+)
+
+# Max per-axis eye rotation, in radians (~34deg). ARKit coefficients are
+# already in [0, 1], so this scales the (down-up) / (in-out) difference
+# directly into an axis-angle magnitude.
+_EYE_MAX_RAD = 0.6
+
+
+def eye_pose_6d_from_blendshapes(bs: dict | None) -> np.ndarray:
+    """ARKit eye-look blendshapes -> FLAME eye_pose (12,) in pytorch3d rot6d.
+
+    Mapping (per-eye axis-angle in the FLAME y-up frame):
+
+        pitch = (eyeLookDown{L,R} - eyeLookUp{L,R}) * _EYE_MAX_RAD   # +X = down
+        yaw   = (eyeLookInLeft    - eyeLookOutLeft) * _EYE_MAX_RAD   # +Y = subject-right
+        yaw   = (eyeLookOutRight  - eyeLookInRight) * _EYE_MAX_RAD   # mirrored: +Y = subject-right
+        aa    = [pitch, yaw, 0]
+
+    Each axis-angle is converted to a 3x3 rotation via
+    `pytorch3d.transforms.axis_angle_to_matrix` and then to 6D via
+    `matrix_to_rotation_6d` (row-major convention, matching the
+    `rotation_6d_to_matrix` call inside `flame/lbs.py`).
+
+    Falls back to identity when `bs` is None or missing every ARKit eye key —
+    so the caller doesn't need to special-case frames without a MediaPipe
+    detection.
+    """
+    if not bs or not any(k in bs for k in _ARKIT_EYE_KEYS):
+        return _default_eye_pose_6d()
+
+    def g(k: str) -> float:
+        return float(bs.get(k, 0.0))
+
+    left_pitch = (g("eyeLookDownLeft") - g("eyeLookUpLeft")) * _EYE_MAX_RAD
+    left_yaw = (g("eyeLookInLeft") - g("eyeLookOutLeft")) * _EYE_MAX_RAD
+    right_pitch = (g("eyeLookDownRight") - g("eyeLookUpRight")) * _EYE_MAX_RAD
+    right_yaw = (g("eyeLookOutRight") - g("eyeLookInRight")) * _EYE_MAX_RAD
+
+    left_aa = np.array([left_pitch, left_yaw, 0.0], dtype=np.float32)
+    right_aa = np.array([right_pitch, right_yaw, 0.0], dtype=np.float32)
+    return np.concatenate(
+        [_axis_angle_to_rot6d(left_aa), _axis_angle_to_rot6d(right_aa)],
+        axis=0,
+    )
 
 
 def _build_K(w: int, h: int, f_px: float) -> np.ndarray:

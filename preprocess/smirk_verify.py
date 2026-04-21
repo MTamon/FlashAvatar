@@ -44,6 +44,7 @@ def dump_verification(payloads, shape, img_size, cfg, verify_dir: Path) -> None:
         from preprocess.smirk_convert import (
             _build_K, _build_R, _build_t, _pad_expression,
             _axis_angle_to_rot6d, _default_eye_pose_6d,
+            eye_pose_6d_from_blendshapes,
         )
         K = _build_K(w, h, cfg.focal_px)
         R = _build_R(r.pose_params)
@@ -61,9 +62,11 @@ def dump_verification(payloads, shape, img_size, cfg, verify_dir: Path) -> None:
             eyelid_t = torch.from_numpy(
                 np.clip(r.eyelid_params, 0.0, 1.0).astype(np.float32)
             ).unsqueeze(0).to(cfg.device)
-            eyes_t = torch.from_numpy(
-                _default_eye_pose_6d()
-            ).float().unsqueeze(0).to(cfg.device)
+            if getattr(cfg, "eye_mode", "blendshapes") == "blendshapes":
+                eyes_np = eye_pose_6d_from_blendshapes(r.blendshapes)
+            else:
+                eyes_np = _default_eye_pose_6d()
+            eyes_t = torch.from_numpy(eyes_np).float().unsqueeze(0).to(cfg.device)
             verts = flame.forward_geo(
                 shape_t, expression_params=exp_t,
                 jaw_pose_params=jaw_t, eye_pose_params=eyes_t,

@@ -5,7 +5,8 @@ is easy to unit-test without touching file I/O.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List
 
 import numpy as np
@@ -29,6 +30,11 @@ class FrameResult:
     bbox_center: np.ndarray       # (2,) full-frame center of the crop bbox
     bbox_size: float              # full-frame side length of the crop bbox
     detected: bool = True         # False => we re-used the previous crop
+    # MediaPipe Face Landmarker blendshape scores (dict[str, float]) used by
+    # `preprocess.smirk_convert.eye_pose_6d_from_blendshapes` to synthesize
+    # eye_pose. None when the `.task` file isn't available and we fell back
+    # to legacy FaceMesh, or when no face was detected on this frame.
+    blendshapes: dict = field(default_factory=dict)
 
 
 class SmirkRunner:
@@ -40,6 +46,7 @@ class SmirkRunner:
         self._load_encoder()
         self._load_mediapipe()
         self._prev_landmarks: np.ndarray | None = None
+        self._prev_blendshapes: dict = {}
 
     def _load_encoder(self) -> None:
         from src.smirk_encoder import SmirkEncoder  # type: ignore
@@ -56,19 +63,76 @@ class SmirkRunner:
         self.encoder = enc
 
     def _load_mediapipe(self) -> None:
-        # Try the SMIRK-bundled wrapper first (uses Face Landmarker .task);
-        # fall back to the legacy FaceMesh API if the .task file is absent.
-        try:
-            from utils.mediapipe_utils import run_mediapipe  # type: ignore
-            self._mediapipe_fn = run_mediapipe
-            self._mediapipe_kind = "smirk"
-        except Exception:
-            import mediapipe as mp
-            self._mp_fm = mp.solutions.face_mesh.FaceMesh(
-                static_image_mode=False, max_num_faces=1, refine_landmarks=True,
-            )
-            self._mediapipe_fn = None
-            self._mediapipe_kind = "legacy"
+        """Build a MediaPipe detector that can surface ARKit blendshapes.
+
+        Preferred path: instantiate `mediapipe.tasks.python.vision.FaceLandmarker`
+        against the `.task` file that SMIRK's `quick_install.sh` downloads to
+        `<smirk_root>/assets/face_landmarker.task`. This exposes
+        `face_blendshapes`, which we feed into
+        `eye_pose_6d_from_blendshapes` downstream.
+
+        Fallback: the legacy `mp.solutions.face_mesh.FaceMesh` API. It still
+        gives us landmarks for the crop but does NOT produce blendshapes — so
+        `eye_mode blendshapes` silently degrades to identity eye pose for
+        every frame. A one-line warning is emitted so the operator can fix
+        the install (typically by re-running `bash external/smirk/quick_install.sh`).
+        """
+        self._landmarker = None
+        self._mp_fm = None
+
+        task_path = self._find_face_landmarker_task()
+        if task_path is not None:
+            try:
+                import mediapipe as mp
+                from mediapipe.tasks import python as mp_python
+                from mediapipe.tasks.python import vision as mp_vision
+
+                base = mp_python.BaseOptions(
+                    model_asset_path=str(task_path),
+                    delegate=mp_python.BaseOptions.Delegate.CPU,
+                )
+                options = mp_vision.FaceLandmarkerOptions(
+                    base_options=base,
+                    output_face_blendshapes=True,
+                    output_facial_transformation_matrixes=False,
+                    num_faces=1,
+                    min_face_detection_confidence=0.1,
+                    min_face_presence_confidence=0.1,
+                )
+                self._landmarker = mp_vision.FaceLandmarker.create_from_options(options)
+                self._mp_image_cls = mp.Image
+                self._mp_image_format = mp.ImageFormat.SRGB
+                return
+            except Exception as e:
+                print(
+                    f"[smirk/runtime] MediaPipe FaceLandmarker init failed "
+                    f"({e.__class__.__name__}: {e}); falling back to legacy "
+                    f"FaceMesh — eye blendshapes will be unavailable.",
+                )
+
+        # Legacy fallback (no blendshapes).
+        import mediapipe as mp
+        self._mp_fm = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=False, max_num_faces=1, refine_landmarks=True,
+        )
+        print(
+            "[smirk/runtime] face_landmarker.task not found under "
+            f"{self.cfg.smirk_root}/assets/ — using legacy FaceMesh. "
+            "`--eye-mode blendshapes` will degrade to identity eye pose; "
+            "run `bash external/smirk/quick_install.sh` to enable blendshapes.",
+        )
+
+    def _find_face_landmarker_task(self) -> Path | None:
+        # SMIRK's quick_install.sh drops it at <smirk_root>/assets/face_landmarker.task.
+        # An operator can also override with $MP_FACE_LANDMARKER_TASK.
+        import os
+        env = os.environ.get("MP_FACE_LANDMARKER_TASK")
+        if env:
+            p = Path(env)
+            if p.is_file():
+                return p
+        cand = Path(self.cfg.smirk_root) / "assets" / "face_landmarker.task"
+        return cand if cand.is_file() else None
 
     # ---- public -------------------------------------------------------
 
@@ -78,16 +142,19 @@ class SmirkRunner:
         centers = []
         sizes = []
         detected_flags = []
+        blendshape_dicts: list[dict] = []
         for img in imgs_rgb:
-            lm = self._detect(img)
+            lm, bs = self._detect(img)
             if lm is None:
                 # Re-use last good landmarks so the crop stays roughly stable;
                 # mark as not-detected so a caller can filter if desired.
                 lm = self._prev_landmarks
+                bs = self._prev_blendshapes
                 detected = False
             else:
                 detected = True
                 self._prev_landmarks = lm
+                self._prev_blendshapes = bs or {}
             if lm is None:
                 raise RuntimeError(
                     "No face detected in the very first frame. "
@@ -99,6 +166,7 @@ class SmirkRunner:
             centers.append(center)
             sizes.append(size)
             detected_flags.append(detected)
+            blendshape_dicts.append(bs or {})
 
         batch = np.stack(crops, axis=0).astype(np.float32) / 255.0
         batch_t = torch.from_numpy(batch).permute(0, 3, 1, 2).to(self.device)
@@ -121,34 +189,48 @@ class SmirkRunner:
                 bbox_center=centers[i],
                 bbox_size=sizes[i],
                 detected=detected_flags[i],
+                blendshapes=blendshape_dicts[i],
             ))
         return results
 
     # ---- landmark detection + crop -----------------------------------
 
-    def _detect(self, img_rgb: np.ndarray) -> np.ndarray | None:
-        if self._mediapipe_kind == "smirk" and self._mediapipe_fn is not None:
+    def _detect(self, img_rgb: np.ndarray):
+        """Return (landmarks (N,2) in full-frame px, blendshapes dict | None).
+
+        Landmarks are what the SMIRK crop needs; blendshapes feed
+        `eye_pose_6d_from_blendshapes`. Either can be None when the backend
+        doesn't support it (legacy FaceMesh never surfaces blendshapes).
+        """
+        if self._landmarker is not None:
+            mp_image = self._mp_image_cls(
+                image_format=self._mp_image_format, data=img_rgb,
+            )
             try:
-                lm = self._mediapipe_fn(img_rgb)
+                res = self._landmarker.detect(mp_image)
             except Exception:
-                lm = None
-            if lm is None:
-                return None
-            if isinstance(lm, tuple):
-                # SMIRK helper returns (landmarks, extra) in some forks.
-                lm = lm[0]
-            lm = np.asarray(lm)
-            if lm.ndim == 3:
-                lm = lm[0]
-            return lm[:, :2] if lm.shape[-1] >= 2 else None
+                return None, None
+            if not res.face_landmarks:
+                return None, None
+            h, w = img_rgb.shape[:2]
+            lm = np.array(
+                [[p.x * w, p.y * h] for p in res.face_landmarks[0]],
+                dtype=np.float64,
+            )
+            bs: dict = {}
+            if res.face_blendshapes:
+                for cat in res.face_blendshapes[0]:
+                    bs[cat.category_name] = float(cat.score)
+            return lm, bs
+
         # legacy FaceMesh fallback
         res = self._mp_fm.process(img_rgb)
         if not res.multi_face_landmarks:
-            return None
+            return None, None
         h, w = img_rgb.shape[:2]
         lm = np.array([[p.x * w, p.y * h]
                        for p in res.multi_face_landmarks[0].landmark])
-        return lm
+        return lm, None
 
     def _crop_224(self, img_rgb: np.ndarray, lm: np.ndarray):
         """Replicates SMIRK's demo `crop_face`. Returns (crop224, tform, c, s).
