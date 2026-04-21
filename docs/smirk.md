@@ -174,14 +174,62 @@ bash scripts/setup_smirk.sh                      # SMIRK + FLAME + task file
 source .venv/bin/activate                        # activate from here on
 ```
 
-Step 1 — extract frames + parsing + matting. Identical regardless of
-which tracker you pick afterwards. Writes
-`dataset/<idname>/raw/{imgs,parsing,alpha}/`:
+Step 1 — decode the input video into per-frame images, parsing masks,
+and matting alphas. This stage is identical regardless of which tracker
+you pick afterwards, and it's the only time the raw `.mp4` is touched —
+from Step 3 onward SMIRK iterates over the **image files** written
+here, never the video.
 
 ```bash
 python scripts/preprocess.py prepare \
     --idname <idname> --video path/to/clip.mp4
 ```
+
+Under the hood `prepare` runs three sub-stages and writes three
+parallel directories at the video's **native resolution** (a later
+`finalize` pass re-crops to 512×512):
+
+| Sub-stage | Tool | Output | First-run requirement |
+|---|---|---|---|
+| `extract` | `ffmpeg` (must be on `PATH`) | `dataset/<idname>/raw/imgs/00001.jpg, 00002.jpg, …` | ffmpeg installed |
+| `parsing` | BiSeNet face-parsing | `dataset/<idname>/raw/parsing/*.png` (per-pixel class labels; `*_neckhead.png` = head+neck mask) | internet (weight auto-download via `gdown`) or `--bisenet-weights PATH` |
+| `matting` | RobustVideoMatting | `dataset/<idname>/raw/alpha/*.jpg` (soft foreground alpha) | internet (first `torch.hub.load`) |
+
+Re-run selectively with `--skip-extract`, `--skip-parsing`, or
+`--skip-matting` once earlier sub-stages are cached. SMIRK's runtime
+(Step 3) reads `raw/imgs/*.jpg` in lexicographic order, so the 5-digit
+zero-padded filenames written here double as the frame IDs that
+`preprocess finalize` will re-key downstream.
+
+### Pre-trim / normalise the clip with ffmpeg (optional but useful)
+
+`prepare` extracts every single frame at the native fps and resolution,
+so any wasted frames get paid for three times (extract → parsing →
+matting → SMIRK encode). It's usually worth normalising the clip with
+ffmpeg before calling `prepare`. The SMIRK-specific constraint worth
+knowing: **MediaPipe must detect a face in the very first frame** to
+seed SMIRK's crop, so any leading blank / turned-away frames have to go:
+
+```bash
+# Trim to the useful range (lossless, no re-encode):
+ffmpeg -ss 00:00:10 -to 00:00:25 -i raw.mp4 -c copy trimmed.mp4
+
+# Downsample 60 fps → 30 fps to roughly halve pipeline runtime
+# with no meaningful loss of tracking quality:
+ffmpeg -i raw.mp4 -vf fps=30 -c:v libx264 -pix_fmt yuv420p -an out.mp4
+
+# Downscale 4K → 1080p — anything past ~1080p is wasted work for
+# SMIRK's 224×224 internal crop:
+ffmpeg -i raw.mp4 -vf "scale=-2:1080" -c:v libx264 -pix_fmt yuv420p -an out.mp4
+
+# Fix odd containers / pixel formats that ffmpeg-inside-prepare
+# struggles with:
+ffmpeg -i weird.mov -c:v libx264 -pix_fmt yuv420p -an normalised.mp4
+```
+
+See [`preprocessing.md`](preprocessing.md) for the full `prepare` flag
+reference (`--bisenet-weights`, `--rvm-variant`, the per-stage skips,
+and the exact file-naming contract).
 
 Step 2 *(optional but recommended on shaky hand-held clips)* — tag the
 blurriest frames so `train.py` / `test.py` can skip them without
