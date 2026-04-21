@@ -30,6 +30,24 @@ class Scene_mica:
         #   side-by-side display; parsing/alpha are NOT required.
         #   `driver_range=(start, end)` restricts the driver frames; default
         #   is the full driver sequence.
+        #
+        # FLAME-shape contract:
+        #   FlashAvatar treats `flame.shape` as a per-identity constant: we
+        #   only ever read it once (from `<mica_datadir>/checkpoint/00000.frame`
+        #   below) and never from the per-frame loop. Both the default
+        #   metrical-tracker path (optimizes a single shared shape across the
+        #   whole sequence) and the SMIRK path (regresses per-frame shape then
+        #   collapses to the median of the first N detected frames; see
+        #   `preprocess/smirk_convert.py::canonicalize_shape`) honour this
+        #   contract by writing the same `shape` tensor into every `.frame`
+        #   file. Because only `00000.frame` is consulted, any residual
+        #   per-frame drift (e.g. accidental mixed `.frame` files from two
+        #   SMIRK runs with different `--shape-frames`) has no effect on the
+        #   rendered avatar. Likewise, in driving mode the driver's
+        #   per-frame shape is NEVER read -- `exp`, `jaw`, `eyes`, `eyelids`,
+        #   R, T, K are the only per-frame quantities consumed below -- so
+        #   the driver's tracker quality for shape is irrelevant to
+        #   reenactment.
         frame_delta = 1 # default mica-tracking starts from the second frame
         driving = driver_mica_datadir is not None
 
