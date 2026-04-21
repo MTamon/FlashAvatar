@@ -163,13 +163,16 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="Canonicalize FLAME identity across the first N "
                          "detected frames (median).")
     sm.add_argument("--eye-mode", choices=["blendshapes", "zero"],
-                    default="blendshapes",
-                    help="Source of FLAME eye_pose. 'blendshapes' (default) "
-                         "derives per-eye yaw/pitch from MediaPipe Face "
-                         "Landmarker ARKit blendshapes (eyeLookIn/Out/Up/Down*) "
-                         "— requires face_landmarker.task from "
-                         "SMIRK's quick_install.sh. 'zero' writes identity, "
-                         "matching the pre-eye-pose behaviour.")
+                    default="zero",
+                    help="Source of FLAME eye_pose. 'zero' (default) writes "
+                         "identity — safe default, matches the pre-eye-pose "
+                         "behaviour. 'blendshapes' enables eye tracking: "
+                         "per-eye yaw/pitch are derived from MediaPipe Face "
+                         "Landmarker ARKit blendshapes "
+                         "(eyeLookIn/Out/Up/Down*), which requires "
+                         "face_landmarker.task from SMIRK's quick_install.sh. "
+                         "Pick 'blendshapes' if you need the trained avatar "
+                         "to track gaze.")
     sm.add_argument("--verify-dir", type=Path, default=None,
                     help="If set, dump landmark reprojection stats + overlay "
                          "JPEGs to this directory for sanity check.")

@@ -38,10 +38,11 @@ class SmirkConfig:
     shape_frames: int = 150          # canonicalize shape over this many frames
     batch_size: int = 8
     overwrite: bool = False
-    # Eye pose source: "blendshapes" (default, derives eye rotation from
-    # MediaPipe Face Landmarker ARKit blendshape coefficients) or "zero"
-    # (identity eye pose for every frame; matches the pre-0.2 behaviour).
-    eye_mode: str = "blendshapes"
+    # Eye pose source: "zero" (default, identity eye pose for every frame —
+    # matches the pre-eye-pose behaviour) or "blendshapes" (derives per-eye
+    # yaw/pitch from MediaPipe Face Landmarker ARKit blendshape coefficients
+    # so the trained avatar tracks gaze).
+    eye_mode: str = "zero"
 
 
 def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,

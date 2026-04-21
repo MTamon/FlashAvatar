@@ -39,11 +39,13 @@ python scripts/preprocess.py finalize --idname <idname>
 python train.py --idname <idname>
 ```
 
-`--eye-mode blendshapes` is the default — per-frame eye rotation is
-derived from MediaPipe ARKit blendshapes (`eyeLookIn/Out/Up/Down*`) so
-the trained avatar tracks gaze. Pass `--eye-mode zero` to reproduce
-pre-0.2 behaviour (identity eye pose). See caveat #1 for the exact
-mapping.
+`--eye-mode zero` is the default — identity eye pose for every frame, so
+the trained avatar's eyes stay locked straight ahead. Pass
+`--eye-mode blendshapes` to **enable eye tracking**: per-frame eye
+rotation is derived from MediaPipe ARKit blendshapes
+(`eyeLookIn/Out/Up/Down*`) captured alongside each SMIRK detection, and
+the trained avatar will follow the subject's gaze. See caveat #1 for the
+exact mapping.
 
 ## Feature compatibility matrix
 
@@ -57,7 +59,7 @@ encoder output:
 | `flame.shape`       | (1, 300)  | `shape_params` per frame    | **median** over the first `--shape-frames` detected frames, shared across every `.frame` file (matches metrical-tracker's "single identity" convention) |
 | `flame.exp`         | (1, 100)  | `expression_params` (1, 50) | **zero-pad** the last 50 dims. FlashAvatar's FLAME basis is 100-dim but the extra 50 are simply never excited by SMIRK. |
 | `flame.jaw`         | (1, 6)    | `jaw_params` axis-angle (3) | `matrix_to_rotation_6d(axis_angle_to_matrix(aa))` |
-| `flame.eyes`        | (1, 12)   | **MediaPipe Face Landmarker blendshapes** (SMIRK doesn't regress eyes) | per-eye `axis_angle = [(down - up) * 0.6, ±(in - out) * 0.6, 0]` -> 3×3 rotation -> pytorch3d rot6d. Yaw sign is mirrored for the right eye so both eyes converge when the subject looks inward. Falls back to identity for frames with no detection. Pass `--eye-mode zero` to disable and write identity instead. |
+| `flame.eyes`        | (1, 12)   | identity (default) **or** **MediaPipe Face Landmarker blendshapes** when `--eye-mode blendshapes` is passed | Default `--eye-mode zero` writes identity 6D × 2 (static eyes). `--eye-mode blendshapes` enables eye tracking: per-eye `axis_angle = [(down - up) * 0.6, ±(in - out) * 0.6, 0]` -> 3×3 rotation -> pytorch3d rot6d. Yaw sign is mirrored for the right eye so both eyes converge when the subject looks inward. Falls back to identity for frames with no detection. |
 | `flame.eyelids`     | (1, 2)    | `eyelid_params`             | clamp `[0, 1]` |
 | `opencv.R`          | (1, 3, 3) | `pose_params` axis-angle    | `Rodrigues(aa)` then `diag(1,-1,-1) @ R` to convert OpenGL (y-up) → OpenCV (y-down, +z forward). |
 | `opencv.t`          | (1, 3)    | `cam=[s, tx, ty]` + crop `tform` | see "Camera synthesis" below |
@@ -110,10 +112,13 @@ invisible to FlashAvatar.
 
 ## Caveats
 
-1. **SMIRK does not regress eye-ball rotation**, so we synthesize it
-   from MediaPipe Face Landmarker ARKit blendshapes captured in the
-   same per-frame detection pass. The mapping follows the ARKit → FLAME
-   convention:
+1. **SMIRK does not regress eye-ball rotation.** The default
+   `--eye-mode zero` writes identity eye pose for every frame, so the
+   trained avatar renders with static eyes. To get a gaze-tracking
+   avatar, pass `--eye-mode blendshapes`: eye rotation is then
+   synthesized from MediaPipe Face Landmarker ARKit blendshapes
+   captured in the same per-frame detection pass. The mapping follows
+   the ARKit → FLAME convention:
 
    - `left_pitch = (eyeLookDownLeft  - eyeLookUpLeft)  * 0.6 rad`
    - `left_yaw   = (eyeLookInLeft    - eyeLookOutLeft) * 0.6 rad`
@@ -123,15 +128,14 @@ invisible to FlashAvatar.
      `matrix_to_rotation_6d` (pytorch3d row convention, matching
      `flame/lbs.py::rotation_6d_to_matrix`).
 
-   This requires the `face_landmarker.task` file that SMIRK's
-   `quick_install.sh` downloads to `external/smirk/assets/`. If the task
-   file is missing, the runtime falls back to the legacy
-   `mp.solutions.face_mesh.FaceMesh` API (no blendshape support) and
-   silently writes identity eye pose — fix with
-   `bash external/smirk/quick_install.sh` and re-run. Pass
-   `--eye-mode zero` to force identity regardless (e.g. for ablations).
-   Eyelids still come from SMIRK's own `eyelid_params` output, not from
-   the MediaPipe blink blendshapes.
+   `--eye-mode blendshapes` requires the `face_landmarker.task` file
+   that SMIRK's `quick_install.sh` downloads to
+   `external/smirk/assets/`. If the task file is missing, the runtime
+   falls back to the legacy `mp.solutions.face_mesh.FaceMesh` API (no
+   blendshape support) and silently degrades to identity eye pose — fix
+   with `bash external/smirk/quick_install.sh` and re-run. Eyelids
+   still come from SMIRK's own `eyelid_params` output regardless of
+   `--eye-mode`, not from the MediaPipe blink blendshapes.
 2. **SMIRK's weak-perspective camera is an approximation.** The
    ortho→persp conversion produces negligible error when the head is
    small relative to the image and the focal is large, but can
@@ -190,10 +194,8 @@ python scripts/preprocess.py filter-blur --idname <idname> --percentile 15
 
 Step 3 — run SMIRK to produce `.frame` files. This is the step that
 differs from the default pipeline: a single feed-forward pass per frame
-instead of per-frame metrical-tracker optimization. The SMIRK runtime
-also performs a MediaPipe Face Landmarker pass, so ARKit eye blendshapes
-land in each `.frame` as a real eye rotation — no extra tooling needed.
-Writes `metrical-tracker/output/<idname>/checkpoint_raw/*.frame`:
+instead of per-frame metrical-tracker optimization. Writes
+`metrical-tracker/output/<idname>/checkpoint_raw/*.frame`:
 
 ```bash
 bash scripts/run_tracker.sh <idname> --smirk \
@@ -203,11 +205,51 @@ bash scripts/run_tracker.sh <idname> --smirk \
 #   python scripts/preprocess.py smirk --idname <idname> --verify-dir ...
 ```
 
+**To enable eye tracking, add `--eye-mode blendshapes`.** This is the
+step that switches the trained avatar from "static eyes" to "follows
+the subject's gaze":
+
+```bash
+bash scripts/run_tracker.sh <idname> --smirk --eye-mode blendshapes \
+    --verify-dir dataset/<idname>/smirk_verify
+```
+
+With `--eye-mode blendshapes`, the SMIRK runtime additionally captures
+MediaPipe Face Landmarker ARKit blendshape coefficients
+(`eyeLookInLeft`, `eyeLookOutLeft`, `eyeLookUpLeft`, `eyeLookDownLeft`
+and the right-eye counterparts) on every frame, converts them to
+per-eye axis-angle rotations, packs them as `(1, 12)` pytorch3d rot6d,
+and writes them into `flame.eyes` of each `.frame`. FlashAvatar's
+deform MLP (`src/deform_model.py`) and FLAME LBS
+(`flame/flame_mica.py`) both consume that tensor, so the final
+rendered avatar will move its eyes in sync with the input clip.
+
+Without the flag (default `--eye-mode zero`), `flame.eyes` is identity
+rot6d × 2 and the avatar's eyes stay locked straight ahead — use this
+when you don't need gaze motion or want to ablate the blendshape
+signal.
+
+`--eye-mode blendshapes` depends on `external/smirk/assets/face_landmarker.task`,
+which SMIRK's `quick_install.sh` (run automatically by
+`scripts/setup_smirk.sh`) downloads. A startup log line from the SMIRK
+runtime confirms which MediaPipe backend is active — if you see
+`face_landmarker.task not found`, re-run
+`bash external/smirk/quick_install.sh` before the tracker step.
+
 Inspect `dataset/<idname>/smirk_verify/stats.csv` and the
 `overlay_*.jpg` renders — a median reprojection error around 10 px on a
 1080p clip means SMIRK's camera is well-aligned with FlashAvatar's. If
 the median is >20 px, bump `--focal-px` (e.g. `--focal-px 8000`) and
 re-run.
+
+Re-running this step with a different `--eye-mode` is cheap — the
+`.frame` files are rewritten in place, and steps 4-6 below are
+identical. Pass `--overwrite` to force regeneration:
+
+```bash
+bash scripts/run_tracker.sh <idname> --smirk \
+    --eye-mode blendshapes --overwrite
+```
 
 Step 4 — finalize: head-centred 512×512 crop + K / `img_size`
 rewrite. Identical regardless of tracker:
@@ -233,19 +275,36 @@ python test.py --idname <idname>
 # writes logs/<idname>/test.avi (every frame by default).
 ```
 
-That's the full loop. If your avatar visibly moves its eyes in the
-rendered output, the blendshape-derived `eyes_pose` has fed through the
-deform MLP + FLAME LBS as intended. If the eyes are locked straight
-ahead even though the input clip shows gaze motion, re-check that
-`face_landmarker.task` lives at `external/smirk/assets/` (see the
-`[smirk/runtime]` startup log line).
+That's the full loop. Eye-tracking sanity check: if you trained with
+`--eye-mode blendshapes` and the rendered avatar's eyes visibly follow
+the subject's gaze, the blendshape-derived `eyes_pose` has fed through
+the deform MLP + FLAME LBS as intended. If the eyes are locked straight
+ahead even though the input clip shows gaze motion, either you trained
+with the default `--eye-mode zero` (re-run step 3 with
+`--eye-mode blendshapes --overwrite`, then steps 4-6) or
+`face_landmarker.task` is missing from `external/smirk/assets/` (check
+the `[smirk/runtime]` startup log line and re-run
+`bash external/smirk/quick_install.sh`).
 
 ### Minimal one-liner (for batch jobs)
+
+Without gaze tracking (static-eye avatar):
 
 ```bash
 source .venv/bin/activate && \
   python scripts/preprocess.py prepare  --idname $ID --video $VIDEO && \
   bash   scripts/run_tracker.sh         $ID --smirk && \
+  python scripts/preprocess.py finalize --idname $ID && \
+  python train.py --idname $ID && \
+  python test.py  --idname $ID
+```
+
+With gaze tracking (add `--eye-mode blendshapes` to the tracker step):
+
+```bash
+source .venv/bin/activate && \
+  python scripts/preprocess.py prepare  --idname $ID --video $VIDEO && \
+  bash   scripts/run_tracker.sh         $ID --smirk --eye-mode blendshapes && \
   python scripts/preprocess.py finalize --idname $ID && \
   python train.py --idname $ID && \
   python test.py  --idname $ID

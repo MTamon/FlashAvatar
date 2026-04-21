@@ -60,17 +60,19 @@ def to_flashavatar_frame(
     shape: np.ndarray,
     img_size: tuple[int, int],
     focal_px: float,
-    eye_mode: str = "blendshapes",
+    eye_mode: str = "zero",
 ) -> dict:
     """Build the dict saved as `.frame` by `torch.save`.
 
     `img_size` is (W, H) of the full raw frame; `shape` is the canonicalized
     300-dim FLAME identity. `eye_mode` is one of:
 
-      "blendshapes" (default) — derive eye_pose from MediaPipe Face
-                                Landmarker ARKit-style blendshape coefficients
-                                captured alongside each frame's detection.
-      "zero"                  — write identity eye pose (legacy behaviour).
+      "zero"        (default) — write identity eye pose (legacy behaviour;
+                                the trained avatar renders with static eyes).
+      "blendshapes"           — derive eye_pose from MediaPipe Face Landmarker
+                                ARKit-style blendshape coefficients captured
+                                alongside each frame's detection. Enables
+                                real gaze tracking.
 
     Falls back to identity whenever blendshapes are unavailable for a frame,
     so callers never need to special-case missing detections.
