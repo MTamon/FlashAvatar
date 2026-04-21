@@ -148,6 +148,13 @@ class Scene_mica:
             oepncv = payload['opencv']
             w2cR = oepncv['R'][0]
             w2cT = oepncv['t'][0]
+            # metrical-tracker / smirk_convert store opencv.{R,t} as torch
+            # tensors; getWorld2View2 uses numpy ops (R.transpose()) so we
+            # materialise them as numpy arrays here.
+            if torch.is_tensor(w2cR):
+                w2cR = w2cR.detach().cpu().numpy()
+            if torch.is_tensor(w2cT):
+                w2cT = w2cT.detach().cpu().numpy()
             R = np.transpose(w2cR) # R is stored transposed due to 'glm' in CUDA code
             T = w2cT
 
