@@ -155,13 +155,23 @@ for mod, want in probes:
         rc = 1
     print(f"  OK    {mod} {ver}{note}")
 
-# SMIRK-specific probe: load the encoder module via the cloned repo path.
-import os
+# SMIRK-specific probe: load smirk_encoder.py directly from the SMIRK
+# clone. We can't rely on `from src.smirk_encoder import SmirkEncoder`
+# here: FlashAvatar ships its own top-level `src/` package (with
+# __init__.py) which, per PEP 420, shadows SMIRK's namespace-style
+# `src/` directory whenever the FlashAvatar root is on sys.path — which
+# it always is for this stdin-driven probe (CWD is the repo root).
+import os, importlib.util
 smirk_root = os.environ["SMIRK_ROOT"]
-sys.path.insert(0, smirk_root)
+smirk_encoder_py = os.path.join(smirk_root, "src", "smirk_encoder.py")
 try:
-    from src.smirk_encoder import SmirkEncoder  # noqa: F401
-    print(f"  OK    src.smirk_encoder (via {smirk_root})")
+    spec = importlib.util.spec_from_file_location(
+        "smirk_encoder", smirk_encoder_py,
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.SmirkEncoder  # attribute probe
+    print(f"  OK    src.smirk_encoder (via {smirk_encoder_py})")
 except Exception as e:
     print(f"  FAIL  src.smirk_encoder: {e}")
     rc = 1
