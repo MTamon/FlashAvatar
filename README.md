@@ -215,6 +215,26 @@ when the crop flag changes. See [docs/preprocessing.md](docs/preprocessing.md)
 for the full design, checkpoint locations and coordinate-system contract.
 The remaining sections below describe the same steps performed manually.
 
+##### Robust tracker: SMIRK (optional)
+
+metrical-tracker's per-frame optimization becomes unstable on videos
+with large head rotation or motion blur. For those, swap it for
+[SMIRK](https://github.com/MTamon/smirk), a feed-forward FLAME encoder,
+via the optional install:
+
+```bash
+bash scripts/setup_smirk.sh                       # one-time, opt-in
+bash scripts/run_tracker.sh myface --smirk        # instead of plain run_tracker.sh
+python scripts/preprocess.py finalize --idname myface --crop
+```
+
+SMIRK is NOT installed by `install_128.sh`. See
+[docs/smirk.md](docs/smirk.md) for the compatibility matrix (exp 50 →
+100 zero-pad, axis-angle → 6D rot conversions, weak-perspective →
+perspective `K/R/t` via the internal 224 crop's similarity transform)
+and caveats (no eye-ball rotation, per-frame shape canonicalized by
+median).
+
 #### Step 1 — Extract video frames
 
 ```bash

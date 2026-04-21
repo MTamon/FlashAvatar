@@ -1,0 +1,214 @@
+"""Convert SMIRK encoder outputs into FlashAvatar `.frame` payloads.
+
+Handles the five awkward impedance mismatches between SMIRK and FlashAvatar:
+
+1. Expression dim (50 vs 100)      -> zero-pad last 50
+2. Jaw representation (aa vs 6D)   -> axis_angle_to_matrix -> matrix_to_rot6d
+3. Eye pose                        -> SMIRK produces none, default identity 6D x2
+4. Global pose (aa + OpenGL)       -> rot matrix, then diag(1,-1,-1) y/z flip
+                                      for OpenCV (y-down, +z forward) convention
+5. Camera (weak-persp in 224 crop) -> perspective K/R/t at FULL raw frame res
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import numpy as np
+import torch
+from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_rotation_6d
+
+if TYPE_CHECKING:
+    from preprocess._smirk.smirk_runtime import FrameResult
+
+
+@dataclass
+class FramePayload:
+    idx: int
+    src_path: Path
+    result: "FrameResult"
+
+
+def canonicalize_shape(payloads: list[FramePayload], n: int) -> np.ndarray:
+    """Collapse per-frame SMIRK shape codes to a single identity.
+
+    Uses the median over the first `n` high-detection frames (robust to the
+    occasional misdetection in the early sequence). Falls back to the mean
+    if fewer than `n` detections are available.
+    """
+    stack = []
+    for p in payloads:
+        if not p.result.detected:
+            continue
+        stack.append(p.result.shape_params)
+        if len(stack) >= n:
+            break
+    if not stack:
+        # No high-confidence frames — fall back to all of them.
+        stack = [p.result.shape_params for p in payloads]
+    arr = np.stack(stack, axis=0)
+    return np.median(arr, axis=0).astype(np.float32)
+
+
+def to_flashavatar_frame(
+    r: "FrameResult",
+    *,
+    shape: np.ndarray,
+    img_size: tuple[int, int],
+    focal_px: float,
+    eye_mode: str = "zero",
+) -> dict:
+    """Build the dict saved as `.frame` by `torch.save`.
+
+    `img_size` is (W, H) of the full raw frame; `shape` is the canonicalized
+    300-dim FLAME identity.
+    """
+    w, h = img_size
+
+    # --- FLAME params --------------------------------------------------
+    shape_100 = _pad_expression(r.expression_params, 100)   # (100,)
+    jaw_6d = _axis_angle_to_rot6d(r.jaw_params)             # (6,)
+    eyes_12 = _default_eye_pose_6d(eye_mode)                # (12,)
+    flame_dict = {
+        "shape": torch.from_numpy(shape).float().unsqueeze(0),       # (1, 300)
+        "exp": torch.from_numpy(shape_100).float().unsqueeze(0),     # (1, 100)
+        "jaw": torch.from_numpy(jaw_6d).float().unsqueeze(0),        # (1, 6)
+        "eyes": torch.from_numpy(eyes_12).float().unsqueeze(0),      # (1, 12)
+        "eyelids": torch.from_numpy(
+            np.clip(r.eyelid_params.astype(np.float32), 0.0, 1.0),
+        ).unsqueeze(0),                                              # (1, 2)
+    }
+
+    # --- OpenCV camera (K, R, t) at full-frame resolution --------------
+    K = _build_K(w, h, focal_px)
+    R = _build_R(r.pose_params)
+    t = _build_t(r.cam, r.tform_matrix, w, h, focal_px)
+
+    return {
+        "flame": flame_dict,
+        "opencv": {
+            "K": torch.from_numpy(K).float().unsqueeze(0),   # (1, 3, 3)
+            "R": torch.from_numpy(R).float().unsqueeze(0),   # (1, 3, 3)
+            "t": torch.from_numpy(t).float().unsqueeze(0),   # (1, 3)
+        },
+        "img_size": (w, h),
+        # Debug / provenance, not read by FlashAvatar:
+        "_smirk": {
+            "cam": r.cam.astype(np.float32),
+            "tform": r.tform_matrix.astype(np.float32),
+            "bbox_center": r.bbox_center.astype(np.float32),
+            "bbox_size": float(r.bbox_size),
+            "focal_px": float(focal_px),
+            "detected": bool(r.detected),
+        },
+    }
+
+
+# --- low-level building blocks -------------------------------------------
+
+def _pad_expression(exp50: np.ndarray, target: int) -> np.ndarray:
+    out = np.zeros((target,), dtype=np.float32)
+    n = min(exp50.shape[0], target)
+    out[:n] = exp50[:n]
+    return out
+
+
+def _axis_angle_to_rot6d(aa: np.ndarray) -> np.ndarray:
+    aa_t = torch.from_numpy(aa.astype(np.float32)).unsqueeze(0)  # (1, 3)
+    R = axis_angle_to_matrix(aa_t)                               # (1, 3, 3)
+    return matrix_to_rotation_6d(R)[0].numpy()                   # (6,)
+
+
+def _default_eye_pose_6d(mode: str) -> np.ndarray:
+    # Identity 6D rotation is the first two columns of I_3: [1,0,0, 0,1,0].
+    # Stack twice (L eye + R eye) -> (12,). The 'blendshapes' option is
+    # reserved for a MediaPipe-blendshape-driven eye tracker; unimplemented
+    # here because FlashAvatar's FLAME currently ignores eye params unless
+    # the deform MLP is retrained to consume them — zero (identity) is safe.
+    if mode not in ("zero", "identity", "blendshapes"):
+        raise ValueError(f"unknown eye_mode: {mode}")
+    eye = np.array([1, 0, 0, 0, 1, 0], dtype=np.float32)
+    return np.concatenate([eye, eye], axis=0)
+
+
+def _build_K(w: int, h: int, f_px: float) -> np.ndarray:
+    cx = w / 2.0
+    cy = h / 2.0
+    return np.array([
+        [f_px, 0.0, cx],
+        [0.0, f_px, cy],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+
+
+# OpenGL (y-up, -z forward) -> OpenCV (y-down, +z forward).
+_GL_TO_CV = np.diag([1.0, -1.0, -1.0]).astype(np.float64)
+
+
+def _build_R(pose_aa: np.ndarray) -> np.ndarray:
+    """World-to-camera rotation. SMIRK's pose rotates the FLAME mesh in an
+    OpenGL-ish frame (y-up) before the renderer flips y for rasterization.
+    FlashAvatar's scene/__init__.py stores opencv.R as a world-to-camera
+    rotation used by the Gaussian rasterizer (via getWorld2View2)."""
+    aa_t = torch.from_numpy(pose_aa.astype(np.float64)).unsqueeze(0)
+    R_gl = axis_angle_to_matrix(aa_t)[0].numpy().astype(np.float64)  # (3, 3)
+    return _GL_TO_CV @ R_gl
+
+
+def _build_t(cam: np.ndarray, tform: np.ndarray,
+             w: int, h: int, f_px: float) -> np.ndarray:
+    """Back-project SMIRK's weak-perspective [s, tx, ty] through the crop's
+    similarity `tform` to an OpenCV translation.
+
+    Derivation:
+      SMIRK renders orthographic in a 224 crop, where the FLAME origin lands
+      at crop pixel (112 + 112*tx, 112 + 112*ty) (with the y-flip folded in).
+      For a perspective camera with focal f_px observing a point at depth Z,
+      the same pixel offset corresponds to world-space (u - cx) * Z / f_px,
+      (v - cy) * Z / f_px. We choose Z so that the mesh has the same screen
+      size as the orthographic projection:
+           projected scale at Z = f_px / Z
+           matches SMIRK scale in full-frame px = s * (bbox_size / 2)
+           where bbox_size is crop_scale * old_size in original pixels.
+      Equivalently Z = (2 * f_px) / (s * crop_size) * (crop_size / bbox_size_224)
+      — but since `tform` is a similarity we can read the scale directly off
+      its 2x2 block as `sim_scale = tform[0, 0]` (it's isotropic by
+      construction), giving `px_per_unit = s * sim_scale_inv * half_crop`
+      and finally Z = f_px / (s * half_crop_full_px) — see code below.
+    """
+    s, tx, ty = float(cam[0]), float(cam[1]), float(cam[2])
+    crop = 224.0
+    half = crop / 2.0
+    # Crop-space pixel of the projected FLAME origin (y flipped to y-down):
+    #   x_ndc = s * (X + tx), y_ndc = s * (Y + ty)
+    #   pix_x = (x_ndc + 1) * half = half + half*s*tx  (for X=0)
+    #   pix_y = (1 - y_ndc) * half = half - half*s*ty  (y flipped)
+    u_crop = half + half * s * tx
+    v_crop = half - half * s * ty
+
+    # Un-warp crop pixel -> full-frame pixel via tform.inverse (homogeneous).
+    # tform maps full -> crop; to go the other way, inv(tform) @ [u,v,1]^T.
+    T_inv = np.linalg.inv(tform)
+    p = T_inv @ np.array([u_crop, v_crop, 1.0], dtype=np.float64)
+    u_full = p[0] / p[2]
+    v_full = p[1] / p[2]
+
+    # Scale bridge: the similarity tform has an isotropic scale that turns
+    # full-frame px into crop px (crop = scale_ff * full). Its inverse is
+    # px_per_unit in full frame.
+    # After weak-perspective with param `s`, one FLAME unit = s * half_crop
+    # px in crop-space = s * half_crop / scale_ff px in full frame.
+    # Matching perspective at depth Z: 1 FLAME unit = f_px / Z full-frame px.
+    # Therefore Z = f_px * scale_ff / (s * half_crop).
+    scale_ff = float(abs(tform[0, 0]))  # crop_px per full_px
+    Z = f_px * scale_ff / max(s * half, 1e-6)
+
+    cx = w / 2.0
+    cy = h / 2.0
+    t = np.array([
+        (u_full - cx) * Z / f_px,
+        (v_full - cy) * Z / f_px,
+        Z,
+    ], dtype=np.float64)
+    return t

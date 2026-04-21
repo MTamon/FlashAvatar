@@ -35,6 +35,7 @@ from . import extract as extract_mod
 from . import matting as matting_mod
 from . import parsing as parsing_mod
 from . import tracker as tracker_mod
+from . import smirk_tracker as smirk_mod
 
 
 def _repo_root() -> Path:
@@ -134,6 +135,41 @@ def build_argparser() -> argparse.ArgumentParser:
     fb.add_argument("--dry-run", action="store_true",
                     help="Report counts only; do not write keep_list / CSV / "
                          "preview.")
+
+    # ---- smirk (alternative FLAME tracker) ----
+    sm = sub.add_parser(
+        "smirk",
+        help="Alternative FLAME tracker using SMIRK (MTamon/smirk@release/"
+             "cuda128). More robust to large head rotation / motion blur "
+             "than metrical-tracker. Requires a prior "
+             "`bash scripts/setup_smirk.sh`.",
+    )
+    _add_common(sm)
+    sm.add_argument("--smirk-root", type=Path,
+                    default=Path("external/smirk"),
+                    help="SMIRK checkout root (default: external/smirk).")
+    sm.add_argument("--checkpoint", type=Path, default=None,
+                    help="SMIRK_em1.pt path. "
+                         "Default: <smirk-root>/pretrained_models/SMIRK_em1.pt")
+    sm.add_argument("--device", default="cuda")
+    sm.add_argument("--batch-size", type=int, default=8)
+    sm.add_argument("--crop-scale", type=float, default=1.4,
+                    help="SMIRK face-crop scale factor (default 1.4, matches "
+                         "SMIRK demo).")
+    sm.add_argument("--focal-px", type=float, default=5000.0,
+                    help="Synthesized perspective focal in pixels (larger = "
+                         "closer to weak-perspective; default 5000).")
+    sm.add_argument("--shape-frames", type=int, default=150,
+                    help="Canonicalize FLAME identity across the first N "
+                         "detected frames (median).")
+    sm.add_argument("--eye-mode", default="zero",
+                    choices=["zero", "blendshapes"],
+                    help="SMIRK doesn't regress eye-ball rotation. 'zero' "
+                         "uses identity 6D; 'blendshapes' (reserved) would "
+                         "use MediaPipe blendshapes.")
+    sm.add_argument("--verify-dir", type=Path, default=None,
+                    help="If set, dump landmark reprojection stats + overlay "
+                         "JPEGs to this directory for sanity check.")
 
     return p
 
@@ -287,6 +323,48 @@ def cmd_filter_blur(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_smirk(args: argparse.Namespace) -> int:
+    repo = Path(args.repo_root).resolve()
+    raw_imgs = smirk_mod.raw_imgs_dir(repo, args.idname)
+    ckpt_raw = smirk_mod.checkpoint_raw_dir(repo, args.idname)
+
+    if not any(raw_imgs.glob("*.jpg")):
+        print(f"no frames under {raw_imgs}; run `preprocess prepare` first.",
+              file=sys.stderr)
+        return 1
+
+    smirk_root = Path(args.smirk_root)
+    if not smirk_root.is_absolute():
+        smirk_root = repo / smirk_root
+    ckpt_path = args.checkpoint
+    if ckpt_path is None:
+        ckpt_path = smirk_root / "pretrained_models" / "SMIRK_em1.pt"
+    if not ckpt_path.is_file():
+        print(f"error: SMIRK checkpoint not found at {ckpt_path}.\n"
+              f"  Run `bash scripts/setup_smirk.sh` to clone + install + "
+              f"download weights.", file=sys.stderr)
+        return 1
+
+    cfg = smirk_mod.SmirkConfig(
+        smirk_root=smirk_root,
+        checkpoint=ckpt_path,
+        device=args.device,
+        crop_scale=args.crop_scale,
+        focal_px=args.focal_px,
+        shape_frames=args.shape_frames,
+        eye_mode=args.eye_mode,
+        batch_size=args.batch_size,
+        overwrite=args.overwrite,
+    )
+    print(f"[smirk] {raw_imgs} -> {ckpt_raw}")
+    n = smirk_mod.run(cfg, raw_imgs, ckpt_raw,
+                      verify_dir=args.verify_dir)
+    print(f"[smirk] wrote {n} .frame files")
+    print(f"[smirk] next: python scripts/preprocess.py finalize "
+          f"--idname {args.idname}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_argparser().parse_args(argv)
     if args.command == "prepare":
@@ -295,6 +373,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_finalize(args)
     if args.command == "filter-blur":
         return cmd_filter_blur(args)
+    if args.command == "smirk":
+        return cmd_smirk(args)
     print(f"unknown command: {args.command}", file=sys.stderr)
     return 1
 

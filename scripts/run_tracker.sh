@@ -11,10 +11,17 @@
 # Usage:
 #   source .venv/bin/activate
 #   bash scripts/run_tracker.sh <idname> [extra tracker args...]
+#   bash scripts/run_tracker.sh <idname> --smirk [extra smirk args...]
+#
+# `--smirk` dispatches to scripts/run_smirk_tracker.sh instead of the
+# metrical-tracker path. Use this for videos with large head motion or
+# motion blur where metrical-tracker fails. Requires a prior
+# `bash scripts/setup_smirk.sh`.
 #
 # If <actor>/identity.npy is missing, MICA is invoked on the first frame
 # to generate it (a 300-dim FLAME shape code). Requires that MICA has
-# been set up via `scripts/setup_metrical_tracker.sh`.
+# been set up via `scripts/setup_metrical_tracker.sh`. (SMIRK path does
+# not need MICA.)
 #
 # Overridable environment variables:
 #   TRACKER_DIR   tracker install dir (default: external/metrical-tracker)
@@ -23,12 +30,41 @@
 set -euo pipefail
 
 if [ "$#" -lt 1 ]; then
-  echo "Usage: $0 <idname> [extra tracker args...]" >&2
+  echo "Usage: $0 <idname> [--smirk] [extra tracker args...]" >&2
   exit 1
 fi
 
 IDNAME=$1
 shift || true
+
+# --smirk is accepted anywhere in the argv; if present, dispatch to the
+# SMIRK runner and forward every other argument through it.
+USE_SMIRK=0
+forwarded=()
+for arg in "$@"; do
+  if [ "$arg" = "--smirk" ]; then
+    USE_SMIRK=1
+  else
+    forwarded+=("$arg")
+  fi
+done
+
+if [ "$USE_SMIRK" = "1" ]; then
+  script_dir_tr=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  if [ "${#forwarded[@]}" -gt 0 ]; then
+    exec bash "$script_dir_tr/run_smirk_tracker.sh" "$IDNAME" "${forwarded[@]}"
+  else
+    exec bash "$script_dir_tr/run_smirk_tracker.sh" "$IDNAME"
+  fi
+fi
+
+# Reset positional parameters to the non-smirk-flagged subset so the rest
+# of this script (unchanged) sees only metrical-tracker-relevant args.
+if [ "${#forwarded[@]}" -gt 0 ]; then
+  set -- "${forwarded[@]}"
+else
+  set --
+fi
 
 TRACKER_DIR=${TRACKER_DIR:-external/metrical-tracker}
 MICA_DIR=${MICA_DIR:-external/MICA}
