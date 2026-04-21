@@ -44,6 +44,21 @@ if __name__ == "__main__":
                              'test.py renders every frame (including ones '
                              'excluded from training) so the video shows how '
                              'the model handles motion-blurred poses.')
+    parser.add_argument('--driver_idname', type=str, default=None,
+                        help='Drive the trained avatar with another identity\'s '
+                             'preprocessed FLAME features '
+                             '(metrical-tracker/output/<driver_idname>/). The '
+                             'trained person\'s shape (and checkpointed '
+                             'Gaussians / MLP) is kept, while per-frame '
+                             'expression, jaw, eye, eyelid, and camera (R, T, K) '
+                             'are taken from the driver. This enables '
+                             'cross-identity reenactment without retraining, '
+                             'since FlashAvatar conditions on identity shape but '
+                             'does NOT bake identity into the driving signal.')
+    parser.add_argument('--driver_range', type=str, default=None,
+                        help='Driver frame range as "start:end" (0-indexed, '
+                             'end-exclusive). Defaults to the full driver '
+                             'sequence when --driver_idname is set.')
     args = parser.parse_args(sys.argv[1:])
     args.device = "cuda"
     lpt = lp.extract(args)
@@ -62,9 +77,38 @@ if __name__ == "__main__":
     data_dir = os.path.join('dataset', args.idname)
     mica_datadir = os.path.join('metrical-tracker/output', args.idname)
     logdir = data_dir+'/'+args.logname
+
+    driver_mica_datadir = None
+    driver_datadir = None
+    driver_range = None
+    if args.driver_idname is not None:
+        driver_mica_datadir = os.path.join('metrical-tracker/output',
+                                           args.driver_idname)
+        driver_datadir = os.path.join('dataset', args.driver_idname)
+        if not os.path.isdir(os.path.join(driver_mica_datadir, 'checkpoint')):
+            raise FileNotFoundError(
+                f"driver tracker output not found: "
+                f"{driver_mica_datadir}/checkpoint. Pre-process the driver "
+                f"video (`scripts/preprocess.py prepare` + "
+                f"`scripts/run_tracker.sh <driver_idname>`) first.")
+        if not os.path.isdir(os.path.join(driver_datadir, 'imgs')):
+            # RGB frames are only used for side-by-side display; missing
+            # imgs are non-fatal (the left half of the canvas will be black).
+            driver_datadir = None
+        if args.driver_range is not None:
+            parts = args.driver_range.split(':')
+            if len(parts) != 2:
+                raise ValueError(
+                    f"--driver_range must be formatted as 'start:end', got "
+                    f"{args.driver_range!r}")
+            driver_range = (int(parts[0]), int(parts[1]))
+
     scene = Scene_mica(data_dir, mica_datadir, train_type=1,
                        white_background=lpt.white_background, device=args.device,
-                       use_keep_list=args.use_keep_list)
+                       use_keep_list=args.use_keep_list,
+                       driver_mica_datadir=driver_mica_datadir,
+                       driver_datadir=driver_datadir,
+                       driver_range=driver_range)
     
     first_iter = 0
     gaussians = GaussianModel(lpt.sh_degree)
@@ -77,12 +121,23 @@ if __name__ == "__main__":
 
     bg_color = [1, 1, 1] if lpt.white_background else [0, 1, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device=args.device)
-    
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    vid_save_path = os.path.join(logdir, 'test.avi')
-    out = cv2.VideoWriter(vid_save_path, fourcc, 25, (args.image_res*2, args.image_res), True)
 
     viewpoint = scene.getCameras().copy()
+    if not viewpoint:
+        raise RuntimeError("scene produced 0 cameras; nothing to render.")
+    # Use the per-camera resolution (driver and identity may differ).
+    canvas_h = int(viewpoint[0].image_height)
+    canvas_w = int(viewpoint[0].image_width)
+
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    if args.driver_idname is not None:
+        os.makedirs(logdir, exist_ok=True)
+        vid_name = f'test_driven_by_{args.driver_idname}.avi'
+    else:
+        vid_name = 'test.avi'
+    vid_save_path = os.path.join(logdir, vid_name)
+    out = cv2.VideoWriter(vid_save_path, fourcc, 25, (canvas_w*2, canvas_h), True)
+
     codedict = {}
     codedict['shape'] = scene.shape_param.to(args.device)
     DeformModel.example_init(codedict)
@@ -105,17 +160,18 @@ if __name__ == "__main__":
         image = image.clamp(0, 1)
 
         gt_image = viewpoint_cam.original_image
-        save_image = np.zeros((args.image_res, args.image_res*2, 3))
+        save_image = np.zeros((canvas_h, canvas_w*2, 3))
         gt_image_np = (gt_image*255.).permute(1,2,0).detach().cpu().numpy()
         image_np = (image*255.).permute(1,2,0).detach().cpu().numpy()
 
-        save_image[:, :args.image_res, :] = gt_image_np
-        save_image[:, args.image_res:, :] = image_np
+        save_image[:, :canvas_w, :] = gt_image_np
+        save_image[:, canvas_w:, :] = image_np
         save_image = save_image.astype(np.uint8)
         save_image = save_image[:,:,[2,1,0]]
 
         out.write(save_image)
     out.release()
+    print(f"[test] wrote {vid_save_path}")
     
     
    
