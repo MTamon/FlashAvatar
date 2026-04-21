@@ -49,21 +49,13 @@ class SmirkRunner:
         self._prev_blendshapes: dict = {}
 
     def _load_encoder(self) -> None:
-        # Load smirk_encoder.py directly by file path. `from src.smirk_encoder
-        # import SmirkEncoder` is unreliable here because FlashAvatar's own
-        # top-level `src/` package (with __init__.py) lives at the repo root
-        # and, per PEP 420's parent-path scan, shadows SMIRK's namespace-style
-        # `src/` even when smirk_root is first on sys.path. The file has no
-        # intra-repo imports (just torch + timm), so a direct spec-based load
-        # is safe.
-        import importlib.util
-        smirk_encoder_py = Path(self.cfg.smirk_root) / "src" / "smirk_encoder.py"
-        spec = importlib.util.spec_from_file_location(
-            "smirk_encoder", str(smirk_encoder_py),
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        enc = module.SmirkEncoder().to(self.device).eval()
+        # SMIRK (MTamon/smirk@release/cuda128) ships as a proper `smirk`
+        # package with `smirk/__init__.py` and `smirk/src/__init__.py`, so
+        # we import via the dotted path. `_ensure_on_pythonpath` puts the
+        # parent of the SMIRK clone on sys.path, which keeps us out of
+        # FlashAvatar's own top-level `src/` namespace.
+        from smirk.src.smirk_encoder import SmirkEncoder  # type: ignore
+        enc = SmirkEncoder().to(self.device).eval()
         ckpt = torch.load(str(self.cfg.checkpoint), map_location=self.device,
                           weights_only=False)
         # SMIRK checkpoints bundle {smirk_encoder, smirk_generator, ...};

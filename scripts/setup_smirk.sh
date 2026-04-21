@@ -155,26 +155,32 @@ for mod, want in probes:
         rc = 1
     print(f"  OK    {mod} {ver}{note}")
 
-# SMIRK-specific probe: load smirk_encoder.py directly from the SMIRK
-# clone. We can't rely on `from src.smirk_encoder import SmirkEncoder`
-# here: FlashAvatar ships its own top-level `src/` package (with
-# __init__.py) which, per PEP 420, shadows SMIRK's namespace-style
-# `src/` directory whenever the FlashAvatar root is on sys.path — which
-# it always is for this stdin-driven probe (CWD is the repo root).
-import os, importlib.util
+# SMIRK-specific probe: import via the `smirk.src.*` dotted path. SMIRK
+# (MTamon/smirk@release/cuda128) ships `__init__.py` at both its repo
+# root and under `src/`, so putting the *parent* of the clone on
+# sys.path makes `smirk.src.smirk_encoder` resolvable without ever
+# colliding with FlashAvatar's own top-level `src/` package.
+import os
 smirk_root = os.environ["SMIRK_ROOT"]
-smirk_encoder_py = os.path.join(smirk_root, "src", "smirk_encoder.py")
-try:
-    spec = importlib.util.spec_from_file_location(
-        "smirk_encoder", smirk_encoder_py,
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    module.SmirkEncoder  # attribute probe
-    print(f"  OK    src.smirk_encoder (via {smirk_encoder_py})")
-except Exception as e:
-    print(f"  FAIL  src.smirk_encoder: {e}")
-    rc = 1
+smirk_parent = os.path.dirname(smirk_root)
+sys.path.insert(0, smirk_parent)
+# Guard against an outdated SMIRK clone that still uses the old `src/`
+# layout (no __init__.py): importing would silently fall through to
+# FlashAvatar's src/ and fail confusingly.
+for need in ("__init__.py", os.path.join("src", "__init__.py")):
+    if not os.path.isfile(os.path.join(smirk_root, need)):
+        print(f"  FAIL  smirk.src.smirk_encoder: SMIRK clone at {smirk_root} "
+              f"is missing {need}. Update with "
+              f"`(cd {smirk_root} && git pull --ff-only origin release/cuda128)`.")
+        rc = 1
+        break
+else:
+    try:
+        from smirk.src.smirk_encoder import SmirkEncoder  # noqa: F401
+        print(f"  OK    smirk.src.smirk_encoder (via {smirk_root})")
+    except Exception as e:
+        print(f"  FAIL  smirk.src.smirk_encoder: {e}")
+        rc = 1
 
 sys.exit(rc)
 PY
