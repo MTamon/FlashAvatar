@@ -41,16 +41,25 @@ def dump_verification(payloads, shape, img_size, cfg, verify_dir: Path) -> None:
         r = p.result
         # Re-derive the same tensors _to_flashavatar_frame builds, so we can
         # reproject FLAME landmarks.
+        #
+        # Uses the LBS convention (head pose via FLAME root-joint rotation,
+        # external R is the pure OpenGL->OpenCV coord flip), matching the
+        # `.frame` files that `to_flashavatar_frame` now writes. A previous
+        # version of this module folded pose into the external R and left
+        # FLAME in canonical — that was the "pose rotation center" bug
+        # documented in docs/smirk.md, which produced a systematic
+        # `δθ × J_root` jitter wherever the head moved.
         from preprocess.smirk_convert import (
-            _build_K, _build_R, _build_t, _pad_expression,
-            _axis_angle_to_rot6d, _default_eye_pose_6d,
+            _build_K, _build_t, _pad_expression,
+            _axis_angle_to_rot6d, _default_eye_pose_6d, _GL_TO_CV,
             eye_pose_6d_from_blendshapes,
         )
         K = _build_K(w, h, cfg.focal_px)
-        R = _build_R(r.pose_params)
+        R = _GL_TO_CV.copy()
         t = _build_t(r.cam, r.bbox_center, r.bbox_size, w, h, cfg.focal_px)
 
-        # Run FLAME forward (canonical frame, no global rotation in the mesh).
+        # Run FLAME forward with the head pose applied via LBS (same
+        # convention `.frame` consumers use at train/test time).
         with torch.no_grad():
             shape_t = torch.from_numpy(shape).float().unsqueeze(0).to(cfg.device)
             exp_t = torch.from_numpy(
@@ -58,6 +67,9 @@ def dump_verification(payloads, shape, img_size, cfg, verify_dir: Path) -> None:
             ).float().unsqueeze(0).to(cfg.device)
             jaw_t = torch.from_numpy(
                 _axis_angle_to_rot6d(r.jaw_params)
+            ).float().unsqueeze(0).to(cfg.device)
+            pose_t = torch.from_numpy(
+                _axis_angle_to_rot6d(r.pose_params)
             ).float().unsqueeze(0).to(cfg.device)
             eyelid_t = torch.from_numpy(
                 np.clip(r.eyelid_params, 0.0, 1.0).astype(np.float32)
@@ -68,10 +80,11 @@ def dump_verification(payloads, shape, img_size, cfg, verify_dir: Path) -> None:
                 eyes_np = _default_eye_pose_6d()
             eyes_t = torch.from_numpy(eyes_np).float().unsqueeze(0).to(cfg.device)
             verts = flame.forward_geo(
-                shape_t, expression_params=exp_t,
+                shape_t, rot_params=pose_t,
+                expression_params=exp_t,
                 jaw_pose_params=jaw_t, eye_pose_params=eyes_t,
                 eyelid_params=eyelid_t,
-            )[0].cpu().numpy()  # (V, 3) canonical frame
+            )[0].cpu().numpy()  # (V, 3) root-joint rotated
 
         # Project: camera-space = R @ X + t, pixel = K @ (x/z)
         X_cam = (R @ verts.T).T + t[None, :]

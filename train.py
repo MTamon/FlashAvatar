@@ -106,7 +106,8 @@ if __name__ == "__main__":
         codedict['expr'] = viewpoint_cam.exp_param
         codedict['eyes_pose'] = viewpoint_cam.eyes_pose
         codedict['eyelids'] = viewpoint_cam.eyelids
-        codedict['jaw_pose'] = viewpoint_cam.jaw_pose 
+        codedict['jaw_pose'] = viewpoint_cam.jaw_pose
+        codedict['head_pose'] = viewpoint_cam.head_pose
         verts_final, rot_delta, scale_coef = DeformModel.decode(codedict)
         
         if iteration == 1:

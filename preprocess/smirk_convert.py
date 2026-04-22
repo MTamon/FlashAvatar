@@ -82,6 +82,7 @@ def to_flashavatar_frame(
     # --- FLAME params --------------------------------------------------
     shape_100 = _pad_expression(r.expression_params, 100)   # (100,)
     jaw_6d = _axis_angle_to_rot6d(r.jaw_params)             # (6,)
+    pose_6d = _axis_angle_to_rot6d(r.pose_params)           # (6,) head rot
     if eye_mode == "blendshapes":
         eyes_12 = eye_pose_6d_from_blendshapes(r.blendshapes)
     elif eye_mode == "zero":
@@ -92,6 +93,15 @@ def to_flashavatar_frame(
     flame_dict = {
         "shape": torch.from_numpy(shape).float().unsqueeze(0),       # (1, 300)
         "exp": torch.from_numpy(shape_100).float().unsqueeze(0),     # (1, 100)
+        # Global head rotation, applied via FLAME LBS (root-joint rotation).
+        # Consumers: `scene.Scene_mica` -> `src.deform_model.decode(codedict)`
+        # -> `flame.forward_geo(rot_params=...)`. Legacy `.frame` files written
+        # before this field was added lack the key; the scene loader falls
+        # back to identity in that case, and the world-to-camera `opencv.R`
+        # that legacy writers folded the pose into continues to drive the
+        # rasterizer — this preserves the rendered output for already-trained
+        # models. See the "pose rotation center" section in docs/smirk.md.
+        "pose": torch.from_numpy(pose_6d).float().unsqueeze(0),      # (1, 6)
         "jaw": torch.from_numpy(jaw_6d).float().unsqueeze(0),        # (1, 6)
         "eyes": torch.from_numpy(eyes_12).float().unsqueeze(0),      # (1, 12)
         "eyelids": torch.from_numpy(
@@ -100,8 +110,15 @@ def to_flashavatar_frame(
     }
 
     # --- OpenCV camera (K, R, t) at full-frame resolution --------------
+    # With the LBS convention above, `opencv.R` is the pure OpenGL->OpenCV
+    # coordinate flip — it no longer carries the head pose. The head pose
+    # is applied via FLAME LBS (root-joint rotation), which avoids the
+    # systematic jitter that "origin-centred rotation" introduced whenever
+    # `pose_params` moved (the canonical FLAME origin is offset from the
+    # actual root joint by `J_root`, so any pose change bled into a
+    # `δθ × J_root` spurious translation).
     K = _build_K(w, h, focal_px)
-    R = _build_R(r.pose_params)
+    R = _GL_TO_CV.copy()
     t = _build_t(r.cam, r.bbox_center, r.bbox_size, w, h, focal_px)
 
     return {

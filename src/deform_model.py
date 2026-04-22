@@ -101,6 +101,22 @@ class Deform_Model(nn.Module):
         jaw_pose = codedict['jaw_pose'].detach()
         eyelids = codedict['eyelids'].detach()
         eyes_pose = codedict['eyes_pose'].detach()
+        # Global head rotation applied via FLAME LBS (root-joint rotation).
+        # When the caller doesn't thread head_pose through codedict (e.g.
+        # legacy callers or .frame files without `flame.pose`), fall back
+        # to identity — the world-to-view R that legacy writers folded the
+        # pose into continues to rotate the rendered mesh, preserving
+        # byte-compatible output for already-trained checkpoints. Kept
+        # OUTSIDE the `condition` tensor on purpose: head pose should
+        # drive LBS geometry, not the per-vertex deformation MLP (its
+        # input feature width is pinned by existing checkpoints).
+        head_pose = codedict.get('head_pose')
+        if head_pose is None:
+            head_pose = torch.tensor(
+                [[1., 0., 0., 0., 1., 0.]],
+                dtype=shape_code.dtype, device=shape_code.device,
+            ).expand(shape_code.shape[0], 6)
+        head_pose = head_pose.detach()
         batch_size = shape_code.shape[0]
         condition = torch.cat((expr_code, jaw_pose, eyes_pose, eyelids), dim=1)
 
@@ -119,6 +135,7 @@ class Deform_Model(nn.Module):
 
         geometry = self.flame_model.forward_geo(
             shape_code,
+            rot_params=head_pose,
             expression_params=expr_code,
             jaw_pose_params=jaw_pose,
             eye_pose_params=eyes_pose,

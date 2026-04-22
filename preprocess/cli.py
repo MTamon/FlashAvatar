@@ -204,16 +204,93 @@ def build_argparser() -> argparse.ArgumentParser:
                          "this is a jitter-attribution tool, not the path "
                          "used to generate training data.")
     sm.add_argument("--demo-lbs-pose", action="store_true",
-                    help="Diagnostic (requires --demo-video): render the "
-                         "FLAME mesh with SMIRK's own demo convention — "
-                         "apply `pose_params` inside FLAME's LBS kinematic "
-                         "tree (rotation around the root joint) instead of "
-                         "externally as an `R @ verts` matmul around the "
-                         "canonical origin. This isolates the true "
-                         "per-frame SMIRK encoder jitter from the "
-                         "\"origin rotation\" amplification that "
-                         "FlashAvatar's default convention introduces at "
-                         "render time. Does NOT affect the `.frame` files.")
+                    help="DEPRECATED no-op (LBS is now the default). Kept "
+                         "as an accepted flag so existing scripts / doc "
+                         "invocations keep working. Use `--demo-ext-pose` "
+                         "to opt IN to the legacy \"pose folded into "
+                         "external R\" convention for A/B diagnostics.")
+    sm.add_argument("--demo-ext-pose", action="store_true",
+                    help="Diagnostic (requires --demo-video): force the "
+                         "legacy pre-fix rendering convention — apply "
+                         "`pose_params` as an `R @ verts` matmul around "
+                         "the FLAME canonical origin instead of via LBS "
+                         "root-joint rotation. This is the buggy "
+                         "\"origin-centred rotation\" path described in "
+                         "the `pose rotation center` section of "
+                         "docs/smirk.md, kept as an opt-in toggle so old "
+                         "`.frame` / checkpoint renders can be "
+                         "reproduced for comparison. Does NOT affect "
+                         "the `.frame` output.")
+    # --- bbox stabilization (SMIRK release/cuda128 PR #7) ---
+    # Affects the crop that SMIRK actually encodes, which in turn drives
+    # cam / bbox_size / t and therefore the whole rendered result. Unlike
+    # `--demo-*` flags above, these DO change the `.frame` output.
+    sm.add_argument("--bbox-mode",
+                    choices=["legacy", "online", "offline"],
+                    default="legacy",
+                    help="How to derive the per-frame SMIRK crop bbox. "
+                         "'legacy' (default) reproduces the pre-PR#7 "
+                         "all-landmarks min/max — keeps `.frame` outputs "
+                         "bit-identical with existing runs. 'online' "
+                         "uses a stable-landmark subset (eye corners / "
+                         "nose / temples) + per-frame One-Euro filter, "
+                         "matching what a real-time / webcam pipeline "
+                         "would produce; single-pass, needs --bbox-fps. "
+                         "'offline' uses the same subset but applies a "
+                         "zero-phase FIR low-pass over the full size "
+                         "series in a pre-pass — best quality for "
+                         "teacher-data prep, two-pass, also needs "
+                         "--bbox-fps.")
+    sm.add_argument("--bbox-all-landmarks", action="store_true",
+                    help="In online / offline mode, fall back to the "
+                         "all-landmarks min/max bbox (same as legacy, "
+                         "but still smoothed). Kept as an escape hatch "
+                         "for sequences where the stable subset ends up "
+                         "on non-face regions — normally you want the "
+                         "default (stable subset on).")
+    sm.add_argument("--bbox-fps", type=float, default=None,
+                    help="Source video fps, required for --bbox-mode "
+                         "online / offline. The One-Euro and FIR cutoffs "
+                         "are specified in Hz and normalised against "
+                         "Nyquist, so the tracker needs the sample rate "
+                         "explicitly (the encode loop itself is "
+                         "frame-indexed and doesn't otherwise know it).")
+    sm.add_argument("--online-size-min-cutoff", type=float, default=1.0,
+                    help="One-Euro min_cutoff (Hz) for the bbox-size "
+                         "filter in --bbox-mode online. Lower = more "
+                         "smoothing when still. Default 1.0.")
+    sm.add_argument("--online-size-beta", type=float, default=0.02,
+                    help="One-Euro beta (speed sensitivity) for the "
+                         "bbox-size filter in --bbox-mode online. "
+                         "Higher = adapts faster on motion. Default 0.02.")
+    sm.add_argument("--online-center-cutoff", type=float, default=None,
+                    help="If set, also One-Euro-filter the bbox center "
+                         "in --bbox-mode online with this min_cutoff (Hz). "
+                         "Unset (default) leaves the center raw so head "
+                         "translation still tracks faithfully — "
+                         "recommended unless landmark detection itself "
+                         "is visibly jittering the center.")
+    sm.add_argument("--online-center-beta", type=float, default=0.02,
+                    help="One-Euro beta for the bbox-center filter in "
+                         "--bbox-mode online (only used when "
+                         "--online-center-cutoff is set). Default 0.02.")
+    sm.add_argument("--offline-size-cutoff", type=float, default=2.5,
+                    help="Zero-phase FIR low-pass cutoff (Hz) for the "
+                         "bbox-size series in --bbox-mode offline. With "
+                         "the stable-landmark subset, the size signal "
+                         "only carries camera-distance changes (not "
+                         "mouth/blink artefacts), so 2-3 Hz is usually "
+                         "safe. Default 2.5.")
+    sm.add_argument("--offline-size-taps", type=int, default=61,
+                    help="Number of FIR taps for the offline size "
+                         "low-pass (rounded up to odd). Must be shorter "
+                         "than the video length. Default 61 "
+                         "(≈1 s group delay at 30 fps before edge "
+                         "compensation).")
+    sm.add_argument("--offline-center-cutoff", type=float, default=None,
+                    help="If set, also FIR-low-pass the bbox center in "
+                         "--bbox-mode offline with this cutoff (Hz). "
+                         "Unset (default) preserves raw center tracking.")
     # --- temporal LPF ---
     sm.add_argument("--lpf-cutoff", type=float, default=None, metavar="HZ",
                     help="Enable a zero-phase FIR low-pass filter over the "
@@ -418,6 +495,17 @@ def cmd_smirk(args: argparse.Namespace) -> int:
               f"download weights.", file=sys.stderr)
         return 1
 
+    # Both `online` and `offline` filter cutoffs are specified in Hz and
+    # normalised against Nyquist downstream; fail fast if fps is missing
+    # so the error surfaces before the runner loads SMIRK + MediaPipe.
+    if args.bbox_mode in ("online", "offline") and args.bbox_fps is None:
+        print(
+            f"error: --bbox-mode {args.bbox_mode} requires --bbox-fps "
+            f"(source video fps). Example: --bbox-fps 30.",
+            file=sys.stderr,
+        )
+        return 1
+
     cfg = smirk_mod.SmirkConfig(
         smirk_root=smirk_root,
         checkpoint=ckpt_path,
@@ -428,6 +516,16 @@ def cmd_smirk(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
         overwrite=args.overwrite,
         eye_mode=args.eye_mode,
+        bbox_mode=args.bbox_mode,
+        bbox_all_landmarks=args.bbox_all_landmarks,
+        bbox_fps=args.bbox_fps,
+        online_size_min_cutoff=args.online_size_min_cutoff,
+        online_size_beta=args.online_size_beta,
+        online_center_cutoff=args.online_center_cutoff,
+        online_center_beta=args.online_center_beta,
+        offline_size_cutoff=args.offline_size_cutoff,
+        offline_size_taps=args.offline_size_taps,
+        offline_center_cutoff=args.offline_center_cutoff,
     )
 
     lpf_cfg = None
@@ -446,13 +544,17 @@ def cmd_smirk(args: argparse.Namespace) -> int:
         )
 
     print(f"[smirk] {raw_imgs} -> {ckpt_raw}")
+    # --demo-lbs-pose is a deprecated no-op; LBS is now the default so the
+    # flag's presence doesn't change anything. --demo-ext-pose opts in to
+    # the legacy pre-fix convention for A/B diagnostics.
     n = smirk_mod.run(cfg, raw_imgs, ckpt_raw,
                       verify_dir=args.verify_dir,
                       demo_path=args.demo_video,
                       demo_fps=args.demo_fps,
                       demo_lock_bbox=args.demo_lock_bbox,
                       demo_smooth_bbox=args.demo_smooth_bbox,
-                      demo_lbs_pose=args.demo_lbs_pose,
+                      demo_lbs_pose=True,
+                      demo_ext_pose=args.demo_ext_pose,
                       lpf_cfg=lpf_cfg)
     print(f"[smirk] wrote {n} .frame files")
     print(f"[smirk] next: python scripts/preprocess.py finalize "
