@@ -667,6 +667,9 @@ python scripts/preprocess.py smirk --idname <idname> \
 | `--demo-ext-pose` | 旧「`pose` を外部 R に畳み込む（原点中心回転）」convention で再投影。診断・A/B 比較専用。**通常は使わず LBS 既定のまま**で十分です。 |
 | `--demo-lbs-pose` | **deprecated no-op**（LBS が既定化済み）。後方互換のため受理されますが何もしません。 |
 | `--demo-fps HZ` | mp4 の再生 fps ヒント（既定 25）。SMIRK 処理はフレームインデックス駆動なのでエンコーダへの指示のみ。 |
+| `--demo-vertex-stride N` | 投影する FLAME 頂点のサンプリング間隔（既定 8、V=5023 なので ~630 点）。`1` で全頂点を描画（SMIRK `release/cuda128` PR #9 の `--show_vertices` に相当）。 |
+| `--demo-vertex-radius PX` | 各頂点ドットの絶対半径 px（既定 1、LINE_AA 付きで ~3x3 ブロブ）。`0` で**単一ピクセル直書き**（LINE_AA なし、SMIRK PR #9 の新既定に一致）。低解像度パネル向け。full-frame 1080p 以上なら既定のままでも視認性は問題ありません。`--demo-vertex-radius-rel` 指定時は無視。 |
+| `--demo-vertex-radius-rel FRAC` | 頂点ドット半径を `min(frame_h, frame_w)` に対する割合で指定（SMIRK の `--vertex_radius_rel` と同等）。異なる解像度の overlay を横並びで比較したいときに便利（例: 1080p で 0.001 ≈ 1 px、0.0005 で単一ピクセル）。 |
 
 典型的な使用パターン（3 本並べて目視比較）:
 
@@ -754,6 +757,7 @@ python scripts/preprocess.py smirk --idname <idname>
 |---|---|---|
 | `--bbox-mode` | `legacy` | `legacy` / `online` / `offline`。既存 `.frame` とのビット互換維持が必要なら `legacy`。 |
 | `--bbox-all-landmarks` | off | 安定部分集合を使わず全ランドマーク min/max に戻す。安定部分集合が顔以外に落ちる特殊ケースの救済弁。通常は既定のまま。 |
+| `--bbox-size-calibration SCALE` | なし（SMIRK 既定 `1.55`） | **安定部分集合**で導出した `size` を legacy 相当のクロップ範囲に合わせるための補正倍率（SMIRK `release/cuda128` PR #8）。安定部分集合は口・顎・眉・額を含まないため、そのまま使うと縦方向の extent が全顔の ~30% しかなく、`online` / `offline` の crop が `legacy` の ~60% の大きさにしかなりません。その結果、再投影された FLAME メッシュや `_draw_mesh` で描かれる**頂点点群が縮小されて**見えます（本バグの直接原因）。未指定のままで SMIRK 側の既定 `STABLE_LANDMARK_SIZE_CALIBRATION = 1.55` が使われ、legacy の crop extent に一致します。診断目的で補正を無効化したいときは `1.0` を渡します。`--bbox-all-landmarks` 指定時や `legacy` モード時は no-op。 |
 | `--bbox-fps HZ` | なし | 映像 FPS。`online` / `offline` で**必須**。cutoff の Nyquist 正規化に使う。 |
 | `--online-size-min-cutoff HZ` | 1.0 | One-Euro の静止時カットオフ。小さいほど静止時に強く平滑化。 |
 | `--online-size-beta` | 0.02 | One-Euro の速度感度。大きいほど速い動きで素早く追従。 |
@@ -799,6 +803,34 @@ python scripts/preprocess.py smirk --idname <idname>
   VIDEO トラッキング状態が二重に進行するのを避け、決定性を保つためです。
 - **`eye-mode blendshapes`** や FLAME `--lpf-*` との併用は自由。どちらも
   本機能と直交します。
+- **安定部分集合のサイズ補正（PR #8）**：安定ランドマーク部分集合は
+  口・顎・眉・額を含まないため、縦方向の extent は全顔の ~30% しかあり
+  ません。そのまま `(width + height) / 2` で `size` を求めると legacy
+  ベースラインの ~60% のクロップになり、`_build_t` を通すと**再投影された
+  FLAME メッシュと頂点点群が縦横ともに縮小されて**見えます（本タスクで
+  報告された `demo_lbs.mp4` の vertex_point 縮小は直接これが原因）。
+  SMIRK `release/cuda128` PR #8 は `extract_bbox_center_size(...,
+  size_calibration=1.55)` を導入し、安定部分集合モードでも legacy と
+  同じクロップ extent を出すようにしました。FlashAvatar は
+  `SmirkConfig.size_calibration` / `--bbox-size-calibration` 経由でこの値を
+  そのまま素通しで渡し、未指定時は SMIRK 側の既定 `1.55` を使います。
+  旧 SMIRK チェックアウト（PR #8 以前）では `load_bbox_tracker` が
+  **明示的に RuntimeError を投げ**、`git pull` の指示を出します
+  （silently に 60% クロップで学習が進むより fail-loud 優先）。
+- **頂点可視化ユーティリティ（PR #9）**：SMIRK 側は `demos/{demo,demo_video,
+  demo_webcam}.py` に重複していた `alpha_blend_mesh_over_input /
+  ndc_to_crop_pixels / crop_pixels_to_full_pixels / draw_vertex_points_*`
+  を `utils/vertex_viz.py` に集約し、**頂点ドットの既定半径を `1`
+  (LINE_AA) → `0`（単一ピクセル直書き）に変更**しました（5023 点を
+  224x224 パネルに描画すると LINE_AA 1px が 3x3 ブロブ化してパネルが
+  潰れるため）。FlashAvatar の `preprocess/smirk_demo.py` は SMIRK
+  renderer を使わず FLAME を自前で投影するため `ndc_to_crop_pixels` 等の
+  座標変換ヘルパは不要ですが、**頂点ドットの粒度コントロール**は同じ
+  恩恵を受けます。`--demo-vertex-stride` / `--demo-vertex-radius` /
+  `--demo-vertex-radius-rel` を追加し、`--demo-vertex-radius 0` で
+  SMIRK PR #9 と同じ「単一ピクセル直書き」になります。全 5023 点を
+  描画して形状ドリフトを目視確認したい時は
+  `--demo-vertex-stride 1 --demo-vertex-radius 0` が推奨値です。
 
 ### demo 用フラグとの関係
 
@@ -844,6 +876,9 @@ python scripts/preprocess.py smirk --idname Mikawa3 \
     --demo-video dataset/Mikawa3/smirk_demo/demo_lbs.mp4 --demo-fps 30
 # 既存 .frame を上書き再生成したい場合は `--overwrite` を追加。
 # 旧互換で `--demo-lbs-pose` を残しても no-op として受理されます。
+# `--bbox-size-calibration` は未指定で OK（SMIRK 側の 1.55 が自動で掛かり、
+# legacy と同じクロップ extent になります）。旧 SMIRK チェックアウトでは
+# ロード時に明示エラーとなるので、指示に従って `git pull` してください。
 ```
 
 ## 時間方向 LPF（`--lpf-cutoff`）

@@ -209,6 +209,34 @@ def build_argparser() -> argparse.ArgumentParser:
                          "invocations keep working. Use `--demo-ext-pose` "
                          "to opt IN to the legacy \"pose folded into "
                          "external R\" convention for A/B diagnostics.")
+    # --- vertex-scatter controls (SMIRK release/cuda128 PR #9) ---
+    # Mirror SMIRK's new `--vertex_stride / --vertex_radius / --vertex_radius_rel`
+    # so FlashAvatar's demo can match SMIRK's own `demo_video.py` output.
+    sm.add_argument("--demo-vertex-stride", type=int, default=8, metavar="N",
+                    help="Project every Nth FLAME vertex onto the demo "
+                         "overlay (V=5023). Default 8 ~= 630 points, "
+                         "dense enough to see shape drift but sparse "
+                         "enough not to saturate the frame. Set to 1 to "
+                         "draw every vertex (matches SMIRK's "
+                         "`--show_vertices --vertex_stride 1`).")
+    sm.add_argument("--demo-vertex-radius", type=int, default=1, metavar="PX",
+                    help="Absolute pixel radius of each projected FLAME-"
+                         "vertex dot. 0 = single-pixel direct write (no "
+                         "LINE_AA) — matches SMIRK PR #9's new default "
+                         "and is the crispest option for low-resolution "
+                         "panels. 1 (the FlashAvatar default, unchanged) "
+                         "draws a LINE_AA circle (~3x3 blob) that is "
+                         "still fine on full-frame 1080p+ source video. "
+                         "Ignored when `--demo-vertex-radius-rel` is set.")
+    sm.add_argument("--demo-vertex-radius-rel", type=float, default=None,
+                    metavar="FRAC",
+                    help="Vertex-dot radius as a fraction of "
+                         "min(frame_h, frame_w). Overrides "
+                         "`--demo-vertex-radius` when given. Equivalent "
+                         "to SMIRK's `--vertex_radius_rel`; recommended "
+                         "when comparing overlays across different "
+                         "source resolutions. E.g. 0.001 on 1080p -> "
+                         "~1 px; 0.0005 -> single pixel.")
     sm.add_argument("--demo-ext-pose", action="store_true",
                     help="Diagnostic (requires --demo-video): force the "
                          "legacy pre-fix rendering convention — apply "
@@ -248,6 +276,23 @@ def build_argparser() -> argparse.ArgumentParser:
                          "for sequences where the stable subset ends up "
                          "on non-face regions — normally you want the "
                          "default (stable subset on).")
+    sm.add_argument("--bbox-size-calibration", type=float, default=None,
+                    metavar="SCALE",
+                    help="Rescale the stable-subset bbox size so its "
+                         "crop extent matches the legacy all-landmarks "
+                         "crop. The stable subset skips mouth / jaw / "
+                         "forehead, so its vertical extent is only ~30% "
+                         "of the full face and an uncalibrated online / "
+                         "offline crop covers ~60% of what legacy did — "
+                         "the reprojected FLAME mesh (and every vertex "
+                         "point drawn on the demo overlay) ends up "
+                         "visibly shrunk. Default: unset = use SMIRK's "
+                         "built-in `STABLE_LANDMARK_SIZE_CALIBRATION` "
+                         "(1.55, tuned to match legacy crop extent). "
+                         "Pass 1.0 to disable compensation for A/B "
+                         "diagnostics against pre-PR#8 outputs. Only "
+                         "relevant under --bbox-mode online / offline "
+                         "with the stable subset on (the default).")
     sm.add_argument("--bbox-fps", type=float, default=None,
                     help="Source video fps, required for --bbox-mode "
                          "online / offline. The One-Euro and FIR cutoffs "
@@ -526,6 +571,7 @@ def cmd_smirk(args: argparse.Namespace) -> int:
         offline_size_cutoff=args.offline_size_cutoff,
         offline_size_taps=args.offline_size_taps,
         offline_center_cutoff=args.offline_center_cutoff,
+        size_calibration=args.bbox_size_calibration,
     )
 
     lpf_cfg = None
@@ -555,6 +601,9 @@ def cmd_smirk(args: argparse.Namespace) -> int:
                       demo_smooth_bbox=args.demo_smooth_bbox,
                       demo_lbs_pose=True,
                       demo_ext_pose=args.demo_ext_pose,
+                      demo_vertex_stride=args.demo_vertex_stride,
+                      demo_vertex_radius=args.demo_vertex_radius,
+                      demo_vertex_radius_rel=args.demo_vertex_radius_rel,
                       lpf_cfg=lpf_cfg)
     print(f"[smirk] wrote {n} .frame files")
     print(f"[smirk] next: python scripts/preprocess.py finalize "
