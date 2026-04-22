@@ -31,7 +31,8 @@ from tqdm import tqdm
 def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
               fps: float = 25.0, draw_bbox: bool = True,
               draw_landmarks: bool = True, draw_mesh: bool = True,
-              mesh_stride: int = 8) -> None:
+              mesh_stride: int = 8, lock_bbox: bool = False,
+              smooth_bbox: int = 0) -> None:
     """Write an overlay mp4 + stats CSV alongside it.
 
     Args:
@@ -46,6 +47,17 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
         mesh_stride: project every Nth FLAME vertex. V=5023 so stride=8
                      gives ~630 points, dense enough to see shape drift
                      but sparse enough not to saturate the frame.
+        lock_bbox: if True, reuse the first frame's bbox (center + size) for
+                   every subsequent frame. Diagnostic: if jitter disappears,
+                   bbox instability is the dominant source. The MediaPipe
+                   overlay still shows the per-frame detected landmarks so
+                   the viewer can see the face drift away from the locked
+                   bbox.
+        smooth_bbox: if > 0, replace each frame's bbox_{center,size} with a
+                   centered moving average over a (2N+1)-frame window. Use
+                   this as a middle ground between lock-bbox and no-op.
+                   Causal/non-causal doesn't matter for this diagnostic — we
+                   have the whole sequence in memory.
     """
     demo_path = Path(demo_path)
     demo_path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,6 +65,18 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
 
     flame = _load_flame(cfg.device)
     w, h = img_size
+
+    # Pre-compute the bbox series once so lock / smooth apply uniformly.
+    bbox_centers, bbox_sizes = _prepare_bbox_series(
+        payloads, lock_bbox=lock_bbox, smooth_bbox=smooth_bbox,
+    )
+    if lock_bbox:
+        print(f"[smirk/demo] --lock-bbox: using frame 0 bbox for all "
+              f"{len(payloads)} frames "
+              f"(center={bbox_centers[0]}, size={bbox_sizes[0]:.1f})")
+    elif smooth_bbox > 0:
+        print(f"[smirk/demo] --smooth-bbox {smooth_bbox}: centred moving "
+              f"average over {2 * smooth_bbox + 1}-frame window")
 
     # mp4v is widely available in OpenCV wheels and plays back in browsers /
     # VS Code previews without a separate codec install. Framerate is a
@@ -71,9 +95,12 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
     stats_rows: list[dict] = []
 
     try:
-        for p in tqdm(payloads, desc="smirk/demo"):
+        for i, p in enumerate(tqdm(payloads, desc="smirk/demo")):
             r = p.result
-            K, R, t = _rebuild_camera(r, w, h, cfg.focal_px)
+            bc_used = bbox_centers[i]
+            bs_used = bbox_sizes[i]
+            K, R, t = _rebuild_camera(r, w, h, cfg.focal_px,
+                                      bbox_center=bc_used, bbox_size=bs_used)
 
             # FLAME mesh in canonical frame.
             X_pix = _project_flame_mesh(flame, shape, r, K, R, t, cfg)
@@ -94,23 +121,30 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
             if draw_landmarks and r.landmarks is not None:
                 _draw_landmarks(frame_bgr, r.landmarks)
             if draw_bbox:
-                _draw_bbox(frame_bgr, r.bbox_center, r.bbox_size,
-                           detected=r.detected)
+                # With lock/smooth, show BOTH: thin raw bbox (for reference)
+                # and thick used-for-camera bbox (what actually drives t).
+                if lock_bbox or smooth_bbox > 0:
+                    _draw_bbox(frame_bgr, r.bbox_center, r.bbox_size,
+                               detected=r.detected, thickness=1, dim=True)
+                _draw_bbox(frame_bgr, bc_used, bs_used,
+                           detected=r.detected, thickness=2)
 
-            # Top-left HUD: frame index + detection flag + bbox size.
+            # Top-left HUD: frame index + detection flag + used bbox size +
+            # derived Z so the reader can see the Z response directly.
             hud = (f"f={p.idx:05d}  det={int(r.detected)}  "
-                   f"bbox={r.bbox_size:6.1f}px  Z={t[2]:7.3f}")
+                   f"bbox={bs_used:6.1f}px  Z={t[2]:7.3f}")
             _draw_hud(frame_bgr, hud)
 
             writer.write(frame_bgr)
 
-            # Per-frame jitter stats (first-differences in full-frame px and
-            # world units). Jitter manifests as high-frequency oscillation
-            # in the "_diff" columns.
+            # Per-frame jitter stats. Columns report BOTH the raw MediaPipe-
+            # derived bbox (bbox_*) and the bbox actually fed into `_build_t`
+            # (used_bbox_*), so --lock-bbox / --smooth-bbox runs remain
+            # comparable to the baseline CSV.
             d_c = (np.zeros(2) if prev_bbox_center is None
-                   else r.bbox_center - prev_bbox_center)
+                   else bc_used - prev_bbox_center)
             d_s = (0.0 if prev_bbox_size is None
-                   else r.bbox_size - prev_bbox_size)
+                   else bs_used - prev_bbox_size)
             d_t = np.zeros(3) if prev_t is None else t - prev_t
             stats_rows.append({
                 "idx": p.idx,
@@ -118,20 +152,23 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
                 "bbox_cx": f"{r.bbox_center[0]:.3f}",
                 "bbox_cy": f"{r.bbox_center[1]:.3f}",
                 "bbox_size": f"{r.bbox_size:.3f}",
+                "used_bbox_cx": f"{bc_used[0]:.3f}",
+                "used_bbox_cy": f"{bc_used[1]:.3f}",
+                "used_bbox_size": f"{bs_used:.3f}",
                 "t_x": f"{t[0]:.5f}",
                 "t_y": f"{t[1]:.5f}",
                 "t_z": f"{t[2]:.5f}",
-                "d_bbox_cx": f"{d_c[0]:.3f}",
-                "d_bbox_cy": f"{d_c[1]:.3f}",
-                "d_bbox_size": f"{d_s:.3f}",
+                "d_used_bbox_cx": f"{d_c[0]:.3f}",
+                "d_used_bbox_cy": f"{d_c[1]:.3f}",
+                "d_used_bbox_size": f"{d_s:.3f}",
                 "d_t_x": f"{d_t[0]:.5f}",
                 "d_t_y": f"{d_t[1]:.5f}",
                 "d_t_z": f"{d_t[2]:.5f}",
                 "speed_bbox_center": f"{float(np.linalg.norm(d_c)):.3f}",
                 "speed_t": f"{float(np.linalg.norm(d_t)):.5f}",
             })
-            prev_bbox_center = r.bbox_center.copy()
-            prev_bbox_size = float(r.bbox_size)
+            prev_bbox_center = bc_used.copy()
+            prev_bbox_size = float(bs_used)
             prev_t = t.copy()
     finally:
         writer.release()
@@ -147,6 +184,44 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
     print(f"[smirk/demo] wrote {stats_path}")
 
 
+# --- bbox diagnostics -----------------------------------------------------
+
+def _prepare_bbox_series(payloads, *, lock_bbox: bool, smooth_bbox: int
+                         ) -> tuple[list[np.ndarray], list[float]]:
+    """Return the (bbox_center, bbox_size) actually fed into `_build_t` per
+    frame, after applying --lock-bbox / --smooth-bbox.
+
+    This is a pure function over the payload list; it doesn't touch the
+    stored FrameResult.bbox_* fields (the raw detection is still drawn in
+    the overlay for visual reference).
+    """
+    raw_centers = [p.result.bbox_center.astype(np.float64) for p in payloads]
+    raw_sizes = [float(p.result.bbox_size) for p in payloads]
+    n = len(payloads)
+
+    if lock_bbox:
+        c0, s0 = raw_centers[0], raw_sizes[0]
+        return [c0.copy() for _ in range(n)], [s0 for _ in range(n)]
+
+    if smooth_bbox > 0:
+        w_ = int(smooth_bbox)
+        # Centred moving average. Offline only — diagnostic, not the
+        # real-time path.
+        centers = []
+        sizes = []
+        cx = np.array([c[0] for c in raw_centers])
+        cy = np.array([c[1] for c in raw_centers])
+        sz = np.array(raw_sizes)
+        for i in range(n):
+            lo = max(0, i - w_)
+            hi = min(n, i + w_ + 1)
+            centers.append(np.array([cx[lo:hi].mean(), cy[lo:hi].mean()]))
+            sizes.append(float(sz[lo:hi].mean()))
+        return centers, sizes
+
+    return raw_centers, raw_sizes
+
+
 # --- drawing helpers ------------------------------------------------------
 
 # BGR colors (we operate on cv2's BGR frames).
@@ -159,7 +234,8 @@ _COL_HUD_FG = (255, 255, 255)
 
 
 def _draw_bbox(frame_bgr: np.ndarray, center: np.ndarray,
-               size: float, detected: bool) -> None:
+               size: float, detected: bool,
+               thickness: int = 2, dim: bool = False) -> None:
     cx, cy = float(center[0]), float(center[1])
     half = float(size) / 2.0
     x0 = int(round(cx - half))
@@ -167,7 +243,9 @@ def _draw_bbox(frame_bgr: np.ndarray, center: np.ndarray,
     x1 = int(round(cx + half))
     y1 = int(round(cy + half))
     col = _COL_BBOX_OK if detected else _COL_BBOX_REUSE
-    cv2.rectangle(frame_bgr, (x0, y0), (x1, y1), col, 2)
+    if dim:
+        col = tuple(int(c * 0.45) for c in col)
+    cv2.rectangle(frame_bgr, (x0, y0), (x1, y1), col, thickness)
     cv2.drawMarker(frame_bgr, (int(round(cx)), int(round(cy))), col,
                    markerType=cv2.MARKER_CROSS, markerSize=10, thickness=1)
 
@@ -228,11 +306,20 @@ def _load_flame(device: str):
     return FLAME_mica(cfg).to(device).eval()
 
 
-def _rebuild_camera(r, w: int, h: int, focal_px: float):
+def _rebuild_camera(r, w: int, h: int, focal_px: float,
+                    bbox_center: np.ndarray | None = None,
+                    bbox_size: float | None = None):
+    """Rebuild (K, R, t) from a FrameResult. `bbox_center` / `bbox_size`
+    can be overridden by the caller (used by --lock-bbox / --smooth-bbox
+    to feed a stabilized bbox into `_build_t` without mutating the
+    FrameResult itself).
+    """
     from preprocess.smirk_convert import _build_K, _build_R, _build_t
+    bc = r.bbox_center if bbox_center is None else bbox_center
+    bs = r.bbox_size if bbox_size is None else bbox_size
     K = _build_K(w, h, focal_px)
     R = _build_R(r.pose_params)
-    t = _build_t(r.cam, r.tform_matrix, w, h, focal_px)
+    t = _build_t(r.cam, bc, bs, w, h, focal_px)
     return K, R, t
 
 

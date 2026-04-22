@@ -188,6 +188,21 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="Playback fps for --demo-video (default 25). The "
                          "SMIRK pipeline is frame-indexed, so this is a hint "
                          "for the mp4 encoder only.")
+    sm.add_argument("--demo-lock-bbox", action="store_true",
+                    help="Diagnostic (requires --demo-video): reuse frame 0's "
+                         "bbox_center and bbox_size for every frame when "
+                         "rebuilding the camera. If jitter largely disappears "
+                         "in the resulting mp4, bbox instability is the "
+                         "dominant source; if it remains, SMIRK encoder "
+                         "output is. Does NOT affect the `.frame` files "
+                         "written to checkpoint_raw/.")
+    sm.add_argument("--demo-smooth-bbox", type=int, default=0, metavar="N",
+                    help="Diagnostic (requires --demo-video): replace each "
+                         "frame's bbox with a centred moving average over a "
+                         "(2N+1)-frame window. A middle ground between "
+                         "no-op (N=0) and --demo-lock-bbox. Offline-only — "
+                         "this is a jitter-attribution tool, not the path "
+                         "used to generate training data.")
 
     return p
 
@@ -378,7 +393,9 @@ def cmd_smirk(args: argparse.Namespace) -> int:
     n = smirk_mod.run(cfg, raw_imgs, ckpt_raw,
                       verify_dir=args.verify_dir,
                       demo_path=args.demo_video,
-                      demo_fps=args.demo_fps)
+                      demo_fps=args.demo_fps,
+                      demo_lock_bbox=args.demo_lock_bbox,
+                      demo_smooth_bbox=args.demo_smooth_bbox)
     print(f"[smirk] wrote {n} .frame files")
     print(f"[smirk] next: python scripts/preprocess.py finalize "
           f"--idname {args.idname}")

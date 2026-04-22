@@ -48,7 +48,7 @@ def dump_verification(payloads, shape, img_size, cfg, verify_dir: Path) -> None:
         )
         K = _build_K(w, h, cfg.focal_px)
         R = _build_R(r.pose_params)
-        t = _build_t(r.cam, r.tform_matrix, w, h, cfg.focal_px)
+        t = _build_t(r.cam, r.bbox_center, r.bbox_size, w, h, cfg.focal_px)
 
         # Run FLAME forward (canonical frame, no global rotation in the mesh).
         with torch.no_grad():
