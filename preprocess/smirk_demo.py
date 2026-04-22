@@ -363,7 +363,7 @@ def _print_summary(rows: list[dict]) -> None:
     if len(rows) < 2:
         return
     speeds_c = np.array([float(r["speed_bbox_center"]) for r in rows[1:]])
-    speeds_s = np.array([abs(float(r["d_bbox_size"])) for r in rows[1:]])
+    speeds_s = np.array([abs(float(r["d_used_bbox_size"])) for r in rows[1:]])
     speeds_t = np.array([float(r["speed_t"]) for r in rows[1:]])
     det_rate = np.mean([int(r["detected"]) for r in rows])
 
