@@ -667,6 +667,9 @@ python scripts/preprocess.py smirk --idname <idname> \
 | `--demo-ext-pose` | 旧「`pose` を外部 R に畳み込む（原点中心回転）」convention で再投影。診断・A/B 比較専用。**通常は使わず LBS 既定のまま**で十分です。 |
 | `--demo-lbs-pose` | **deprecated no-op**（LBS が既定化済み）。後方互換のため受理されますが何もしません。 |
 | `--demo-fps HZ` | mp4 の再生 fps ヒント（既定 25）。SMIRK 処理はフレームインデックス駆動なのでエンコーダへの指示のみ。 |
+| `--demo-vertex-stride N` | 投影する FLAME 頂点のサンプリング間隔（既定 8、V=5023 なので ~630 点）。`1` で全頂点を描画（SMIRK `release/cuda128` PR #9 の `--show_vertices` に相当）。 |
+| `--demo-vertex-radius PX` | 各頂点ドットの絶対半径 px（既定 1、LINE_AA 付きで ~3x3 ブロブ）。`0` で**単一ピクセル直書き**（LINE_AA なし、SMIRK PR #9 の新既定に一致）。低解像度パネル向け。full-frame 1080p 以上なら既定のままでも視認性は問題ありません。`--demo-vertex-radius-rel` 指定時は無視。 |
+| `--demo-vertex-radius-rel FRAC` | 頂点ドット半径を `min(frame_h, frame_w)` に対する割合で指定（SMIRK の `--vertex_radius_rel` と同等）。異なる解像度の overlay を横並びで比較したいときに便利（例: 1080p で 0.001 ≈ 1 px、0.0005 で単一ピクセル）。 |
 
 典型的な使用パターン（3 本並べて目視比較）:
 
@@ -814,6 +817,20 @@ python scripts/preprocess.py smirk --idname <idname>
   旧 SMIRK チェックアウト（PR #8 以前）では `load_bbox_tracker` が
   **明示的に RuntimeError を投げ**、`git pull` の指示を出します
   （silently に 60% クロップで学習が進むより fail-loud 優先）。
+- **頂点可視化ユーティリティ（PR #9）**：SMIRK 側は `demos/{demo,demo_video,
+  demo_webcam}.py` に重複していた `alpha_blend_mesh_over_input /
+  ndc_to_crop_pixels / crop_pixels_to_full_pixels / draw_vertex_points_*`
+  を `utils/vertex_viz.py` に集約し、**頂点ドットの既定半径を `1`
+  (LINE_AA) → `0`（単一ピクセル直書き）に変更**しました（5023 点を
+  224x224 パネルに描画すると LINE_AA 1px が 3x3 ブロブ化してパネルが
+  潰れるため）。FlashAvatar の `preprocess/smirk_demo.py` は SMIRK
+  renderer を使わず FLAME を自前で投影するため `ndc_to_crop_pixels` 等の
+  座標変換ヘルパは不要ですが、**頂点ドットの粒度コントロール**は同じ
+  恩恵を受けます。`--demo-vertex-stride` / `--demo-vertex-radius` /
+  `--demo-vertex-radius-rel` を追加し、`--demo-vertex-radius 0` で
+  SMIRK PR #9 と同じ「単一ピクセル直書き」になります。全 5023 点を
+  描画して形状ドリフトを目視確認したい時は
+  `--demo-vertex-stride 1 --demo-vertex-radius 0` が推奨値です。
 
 ### demo 用フラグとの関係
 

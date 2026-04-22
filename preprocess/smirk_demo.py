@@ -33,7 +33,9 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
               draw_landmarks: bool = True, draw_mesh: bool = True,
               mesh_stride: int = 8, lock_bbox: bool = False,
               smooth_bbox: int = 0, use_lbs_pose: bool = True,
-              use_ext_pose: bool = False) -> None:
+              use_ext_pose: bool = False,
+              vertex_radius: int = 1,
+              vertex_radius_rel: float | None = None) -> None:
     """Write an overlay mp4 + stats CSV alongside it.
 
     Args:
@@ -47,7 +49,10 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
              indexed) so this is purely a playback hint.
         mesh_stride: project every Nth FLAME vertex. V=5023 so stride=8
                      gives ~630 points, dense enough to see shape drift
-                     but sparse enough not to saturate the frame.
+                     but sparse enough not to saturate the frame. Set to 1
+                     to draw every vertex (useful combined with
+                     `vertex_radius=0` to match SMIRK PR #9's
+                     `--show_vertices --vertex_radius 0` behaviour).
         lock_bbox: if True, reuse the first frame's bbox (center + size) for
                    every subsequent frame. Diagnostic: if jitter disappears,
                    bbox instability is the dominant source. The MediaPipe
@@ -70,6 +75,17 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
                    useful for A/B comparisons against old checkpoints /
                    legacy `.frame` files; overrides `use_lbs_pose` when
                    set. Does NOT affect the `.frame` output.
+        vertex_radius: absolute pixel radius of each projected FLAME-vertex
+                   dot. 0 means "single-pixel direct write" (no LINE_AA),
+                   matching SMIRK `release/cuda128` PR #9's new default.
+                   Pre-PR#9 FlashAvatar used 1 + LINE_AA (~3x3 blob), which
+                   is still fine at full-frame source resolution (e.g.
+                   1080p) but saturates low-res panels. Ignored when
+                   `vertex_radius_rel` is set.
+        vertex_radius_rel: radius as a fraction of `min(frame_h, frame_w)`.
+                   Overrides `vertex_radius` when not None. Equivalent to
+                   SMIRK's `--vertex_radius_rel`; recommended when
+                   comparing outputs across different source resolutions.
     """
     # `use_ext_pose=True` takes precedence — it's an opt-in diagnostic for
     # reproducing the old buggy rendering convention. Otherwise honour the
@@ -140,7 +156,9 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
             _resize_if_needed(frame_bgr, (w, h))
 
             if draw_mesh:
-                _draw_mesh(frame_bgr, X_pix, stride=mesh_stride)
+                _draw_mesh(frame_bgr, X_pix, stride=mesh_stride,
+                           radius=vertex_radius,
+                           radius_rel=vertex_radius_rel)
             if draw_landmarks and r.landmarks is not None:
                 _draw_landmarks(frame_bgr, r.landmarks)
             if draw_bbox:
@@ -285,17 +303,49 @@ def _draw_landmarks(frame_bgr: np.ndarray, landmarks: np.ndarray) -> None:
 
 
 def _draw_mesh(frame_bgr: np.ndarray, X_pix: np.ndarray,
-               stride: int) -> None:
+               stride: int, radius: int = 1,
+               radius_rel: float | None = None) -> None:
+    """Scatter projected FLAME vertices onto ``frame_bgr``.
+
+    Mirrors the scatter semantics of SMIRK `release/cuda128` PR #9's
+    ``utils.vertex_viz.draw_vertex_points_bgr``:
+
+    * ``radius == 0`` → single-pixel direct write (no ``cv2.circle`` / no
+      LINE_AA). Crispest possible dot; use when drawing every vertex
+      (stride=1) on a 224-scale panel.
+    * ``radius > 0``  → ``cv2.circle(..., LINE_AA)`` as before. Default 1
+      keeps backward-compatible behaviour on full-frame (e.g. 1080p)
+      source video where a single pixel would be invisible.
+    * ``radius_rel``  → fraction of ``min(h, w)``; overrides ``radius`` when
+      given. Round-to-int; values that round to 0 produce single-pixel
+      dots.
+    """
     h, w = frame_bgr.shape[:2]
+    if radius_rel is not None:
+        r = int(round(float(radius_rel) * min(h, w)))
+    else:
+        r = int(radius)
+    r = max(0, r)
+
     pts = X_pix[::max(1, int(stride))]
-    for x, y in pts:
-        if not (np.isfinite(x) and np.isfinite(y)):
-            continue
-        xi = int(round(float(x)))
-        yi = int(round(float(y)))
-        if 0 <= xi < w and 0 <= yi < h:
-            cv2.circle(frame_bgr, (xi, yi), 1, _COL_MESH, -1,
-                       lineType=cv2.LINE_AA)
+    if r == 0:
+        colour = np.array([int(c) for c in _COL_MESH], dtype=np.uint8)
+        for x, y in pts:
+            if not (np.isfinite(x) and np.isfinite(y)):
+                continue
+            xi = int(round(float(x)))
+            yi = int(round(float(y)))
+            if 0 <= xi < w and 0 <= yi < h:
+                frame_bgr[yi, xi] = colour
+    else:
+        for x, y in pts:
+            if not (np.isfinite(x) and np.isfinite(y)):
+                continue
+            xi = int(round(float(x)))
+            yi = int(round(float(y)))
+            if 0 <= xi < w and 0 <= yi < h:
+                cv2.circle(frame_bgr, (xi, yi), r, _COL_MESH, -1,
+                           lineType=cv2.LINE_AA)
 
 
 def _draw_hud(frame_bgr: np.ndarray, text: str) -> None:

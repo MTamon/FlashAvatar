@@ -92,6 +92,9 @@ def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
         demo_smooth_bbox: int = 0,
         demo_lbs_pose: bool = True,
         demo_ext_pose: bool = False,
+        demo_vertex_stride: int = 8,
+        demo_vertex_radius: int = 1,
+        demo_vertex_radius_rel: float | None = None,
         lpf_cfg=None) -> int:
     """Drive the whole tracker: detect+crop+encode+convert+write.
 
@@ -170,7 +173,10 @@ def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
         dump_demo(payloads, shape, img_size, cfg, demo_path, fps=demo_fps,
                   lock_bbox=demo_lock_bbox, smooth_bbox=demo_smooth_bbox,
                   use_lbs_pose=demo_lbs_pose,
-                  use_ext_pose=demo_ext_pose)
+                  use_ext_pose=demo_ext_pose,
+                  mesh_stride=demo_vertex_stride,
+                  vertex_radius=demo_vertex_radius,
+                  vertex_radius_rel=demo_vertex_radius_rel)
 
     return n_written
 
