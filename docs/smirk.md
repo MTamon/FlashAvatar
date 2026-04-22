@@ -248,6 +248,17 @@ bash scripts/run_tracker.sh <idname> --smirk \
 #   python scripts/preprocess.py smirk --idname <idname> --verify-dir ...
 ```
 
+> **新規データには `--bbox-mode offline` を推奨します。** 口の開閉・瞬きの
+> たびに再投影メッシュが揺れる問題（詳細は「BBox 安定化」節）を抑えます。
+> 既存学習済みモデルとのビット互換が必要な場合のみ既定（`legacy`）を
+> 使ってください。
+>
+> ```bash
+> bash scripts/run_tracker.sh <idname> --smirk \
+>     --bbox-mode offline --bbox-fps 30 \
+>     --verify-dir dataset/<idname>/smirk_verify
+> ```
+
 **視線追従を有効化するには `--eye-mode blendshapes` を追加します。**
 これが学習済みアバターを「固定目」から「被写体の視線を追う」へ切り替える
 ステップです。
@@ -351,6 +362,141 @@ source .venv/bin/activate && \
   python train.py --idname $ID && \
   python test.py  --idname $ID
 ```
+
+bbox 安定化あり（新規データ用の推奨設定。`--bbox-fps` は原動画の FPS）：
+
+```bash
+source .venv/bin/activate && \
+  python scripts/preprocess.py prepare  --idname $ID --video $VIDEO && \
+  bash   scripts/run_tracker.sh         $ID --smirk \
+           --bbox-mode offline --bbox-fps 30 \
+           --eye-mode blendshapes && \
+  python scripts/preprocess.py finalize --idname $ID && \
+  python train.py --idname $ID && \
+  python test.py  --idname $ID
+```
+
+## 実行方法まとめ（前処理／デモ／学習／テスト）
+
+ここまでの内容を、「どのコマンドを何の目的で打つか」で一覧化します。
+`<idname>` は安定した識別子、`<video>` は入力動画、`<fps>` は原動画の
+FPS（例：30）。`--bbox-mode offline` を推奨しますが、既存 `.frame` との
+互換性が必要な場合は `legacy`（既定）のままでも構いません。
+
+### 1. 前処理
+
+前処理は「フレーム展開＋マスク生成（`prepare`）」→「SMIRK トラッキング
+（`run_tracker.sh --smirk`）」→「512×512 クロップ／K 調整（`finalize`）」の
+3 段です。SMIRK ステップが `.frame` を生成する中核で、ここに `--bbox-mode`
+が効きます。
+
+```bash
+source .venv/bin/activate
+
+# (a) 動画 → フレーム/parsing/alpha（どのトラッカーでも同じ）
+python scripts/preprocess.py prepare --idname <idname> --video <video>
+
+# (b) SMIRK で `.frame` 生成（bbox 安定化 + 視線追従つき推奨）
+bash scripts/run_tracker.sh <idname> --smirk \
+    --bbox-mode offline --bbox-fps <fps> \
+    --eye-mode blendshapes \
+    --verify-dir dataset/<idname>/smirk_verify
+
+# (c) 最終 512×512 クロップ + K / img_size 書き換え（どのトラッカーでも同じ）
+python scripts/preprocess.py finalize --idname <idname>
+```
+
+**変形例：**
+
+- 既存 `.frame` とのビット互換が必要な場合は `--bbox-mode` を省略（=`legacy`）。
+- リアルタイム相当の平滑（causal）を使う場合は
+  `--bbox-mode online --bbox-fps <fps>`。
+- 速度・加速度特徴の教師データ用途には FLAME 側の LPF も併用：
+  `--lpf-cutoff 2.0 --lpf-fps <fps> --lpf-channels cam,pose,exp,jaw,eyelids`。
+- 手ブレの大きい素材では `finalize` の前に
+  `python scripts/preprocess.py filter-blur --idname <idname> --percentile 15`。
+- `--eye-mode` は学習済みアバターを固定目にするなら `zero`（既定）、
+  視線追従にするなら `blendshapes`。
+
+### 2. デモ（トラッキング品質の確認）
+
+SMIRK ステップに `--demo-video` を追加すると、元フレームに **bbox・
+MediaPipe ランドマーク・FLAME メッシュ再投影**を重ね書きした mp4 と、
+フレームごとの jitter 指標（`*_stats.csv`）が出ます。`.frame` 出力には
+影響しません（`--demo-lbs-pose` などの `--demo-*` フラグは描画側のみ）。
+
+本タスクで共有されたコマンド（bbox 安定化を有効化した最終形）：
+
+```bash
+# bbox 安定化 + LBS convention での再投影
+python scripts/preprocess.py smirk --idname Mikawa3 \
+    --bbox-mode offline --bbox-fps 30 \
+    --demo-video dataset/Mikawa3/smirk_demo/demo_lbs.mp4 --demo-fps 30 \
+    --demo-lbs-pose
+# 既存 `.frame` を再生成したい場合は `--overwrite` を追加。
+```
+
+比較用の追加パターン（必要なら並べて見比べる）：
+
+```bash
+# baseline: bbox 安定化なし・FlashAvatar 既定 convention
+python scripts/preprocess.py smirk --idname <idname> \
+    --demo-video dataset/<idname>/smirk_demo/demo_legacy.mp4 --demo-fps <fps>
+
+# bbox 安定化あり・FlashAvatar 既定 convention（ext-R）
+python scripts/preprocess.py smirk --idname <idname> \
+    --bbox-mode offline --bbox-fps <fps> \
+    --demo-video dataset/<idname>/smirk_demo/demo_ext.mp4 --demo-fps <fps> \
+    --overwrite
+
+# bbox 安定化あり・LBS convention（SMIRK 公式と同じ、回転中心問題を回避）
+python scripts/preprocess.py smirk --idname <idname> \
+    --bbox-mode offline --bbox-fps <fps> \
+    --demo-video dataset/<idname>/smirk_demo/demo_lbs.mp4 --demo-fps <fps> \
+    --demo-lbs-pose --overwrite
+```
+
+**補助フラグ（いずれも demo 描画専用で `.frame` に影響なし）：**
+
+- `--demo-lock-bbox` — 先頭フレームの bbox を全フレームに固定。残存 jitter が
+  encoder 由来か bbox 由来かを切り分ける。
+- `--demo-smooth-bbox N` — `(2N+1)` フレーム中心平均。lock と baseline の中間。
+- `--demo-lbs-pose` — `pose_params` を FLAME LBS で適用して再投影。
+  「原点中心回転」由来の系統誤差を除去して encoder 本来の揺れだけを見たい時。
+
+### 3. 学習
+
+`finalize` まで済んだら `train.py` を走らせます。SMIRK 由来か
+metrical-tracker 由来かで学習コード側の分岐はありません（同じ `.frame`
+形式を消費）。
+
+```bash
+python train.py --idname <idname>
+# チェックポイントは logs/<idname>/ 配下に出力
+```
+
+主なオプションは `arguments/` 配下のパーサ定義を参照。SMIRK + bbox 安定化
+で作った `.frame` でも、metrical-tracker の `.frame` と同じ設定で学習できます。
+
+### 4. テスト（レンダリング）
+
+学習済みチェックポイントで test 分割をレンダリングします。
+
+```bash
+python test.py --idname <idname>
+# logs/<idname>/test.avi に書き出す（既定では全フレーム）
+```
+
+### 5. 再実行のコツ
+
+- **SMIRK ステップの再実行は安価**です。`.frame` ファイルは同じディレクトリに
+  上書き書き込まれ、以降の `finalize` / `train.py` / `test.py` は再キックで
+  同じ結果になります。`--bbox-mode` を `legacy` と `offline` で往復したい時は
+  `--overwrite` をつけます。
+- `--bbox-mode` を切り替えた後、**`finalize` を再実行する必要はありません**
+  （finalize が読むのは `checkpoint_raw/*.frame` で、その内容が丸ごと差し替わる
+  だけなので）。ただし学習済みモデルは `.frame` の内容に依存するので、モードを
+  切り替えたら**再学習が必要**な点に注意してください。
 
 ## SMIRK 自体のデモを動かす（任意のスモークテスト）
 
@@ -650,6 +796,41 @@ python scripts/preprocess.py smirk --idname <idname>
 
 - jitter 源の診断が目的 → `--demo-lock-bbox` / `--demo-smooth-bbox` を使う。
 - 実際に学習・出力を改善したい → `--bbox-mode {online, offline}` を使う。
+
+`--bbox-mode` と `--demo-video` / `--demo-lbs-pose` は**併用可能**です。
+demo オーバーレイは `FrameResult.bbox_center` / `bbox_size` をそのまま
+読むため、`--bbox-mode online` / `offline` を指定した状態では demo 上の
+bbox 枠・HUD の `bbox=...`・stats CSV の `bbox_*` 列は **すべて平滑化後の
+値** になります。平滑化前後を見比べたい場合は 2 回走らせて出力を並べます。
+
+```bash
+# 生の bbox（all-landmarks min/max、未平滑）
+python scripts/preprocess.py smirk --idname <idname> \
+    --bbox-mode legacy \
+    --demo-video dataset/<idname>/smirk_demo/demo_legacy.mp4 --demo-fps 30 \
+    --demo-lbs-pose
+
+# 安定化後の bbox（stable subset + zero-phase FIR）
+python scripts/preprocess.py smirk --idname <idname> \
+    --bbox-mode offline --bbox-fps 30 \
+    --demo-video dataset/<idname>/smirk_demo/demo_offline.mp4 --demo-fps 30 \
+    --demo-lbs-pose --overwrite
+```
+
+なお `--demo-lock-bbox` / `--demo-smooth-bbox` を `--bbox-mode online/offline`
+の上に重ねて指定することも可能ですが、**平滑化後の値を更に固定／平均する**
+動作になる点に注意してください（素の raw bbox が欲しい場合は上の 2 走行
+を比較するのが早いです）。
+
+例（本タスクで共有されたデモコマンドに bbox 安定化を足すケース）：
+
+```bash
+python scripts/preprocess.py smirk --idname Mikawa3 \
+    --bbox-mode offline --bbox-fps 30 \
+    --demo-video dataset/Mikawa3/smirk_demo/demo_lbs.mp4 --demo-fps 30 \
+    --demo-lbs-pose
+# 既存 .frame を上書き再生成したい場合は `--overwrite` を追加。
+```
 
 ## 時間方向 LPF（`--lpf-cutoff`）
 
