@@ -32,7 +32,7 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
               fps: float = 25.0, draw_bbox: bool = True,
               draw_landmarks: bool = True, draw_mesh: bool = True,
               mesh_stride: int = 8, lock_bbox: bool = False,
-              smooth_bbox: int = 0) -> None:
+              smooth_bbox: int = 0, use_lbs_pose: bool = False) -> None:
     """Write an overlay mp4 + stats CSV alongside it.
 
     Args:
@@ -58,6 +58,13 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
                    this as a middle ground between lock-bbox and no-op.
                    Causal/non-causal doesn't matter for this diagnostic — we
                    have the whole sequence in memory.
+        use_lbs_pose: if True, apply `pose_params` inside FLAME's LBS
+                   kinematic tree (rotation around the root joint) and set
+                   the external R to the pure GL->CV coord flip. This
+                   matches SMIRK's own demo rendering and isolates the
+                   true per-frame encoder jitter from the "origin rotation"
+                   amplification FlashAvatar's pipeline introduces. Does
+                   NOT affect the `.frame` output.
     """
     demo_path = Path(demo_path)
     demo_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,6 +84,10 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
     elif smooth_bbox > 0:
         print(f"[smirk/demo] --smooth-bbox {smooth_bbox}: centred moving "
               f"average over {2 * smooth_bbox + 1}-frame window")
+    if use_lbs_pose:
+        print("[smirk/demo] --lbs-pose: rendering with FLAME LBS root-joint "
+              "rotation (SMIRK demo convention). `.frame` output is "
+              "unchanged; this only affects the overlay mp4.")
 
     # mp4v is widely available in OpenCV wheels and plays back in browsers /
     # VS Code previews without a separate codec install. Framerate is a
@@ -100,10 +111,12 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
             bc_used = bbox_centers[i]
             bs_used = bbox_sizes[i]
             K, R, t = _rebuild_camera(r, w, h, cfg.focal_px,
-                                      bbox_center=bc_used, bbox_size=bs_used)
+                                      bbox_center=bc_used, bbox_size=bs_used,
+                                      use_lbs_pose=use_lbs_pose)
 
-            # FLAME mesh in canonical frame.
-            X_pix = _project_flame_mesh(flame, shape, r, K, R, t, cfg)
+            # FLAME mesh, optionally posed via LBS.
+            X_pix = _project_flame_mesh(flame, shape, r, K, R, t, cfg,
+                                        use_lbs_pose=use_lbs_pose)
 
             # Compose the overlay. cv2 works in BGR; we read RGB from disk.
             frame_bgr = cv2.imread(str(p.src_path), cv2.IMREAD_COLOR)
@@ -130,9 +143,12 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
                            detected=r.detected, thickness=2)
 
             # Top-left HUD: frame index + detection flag + used bbox size +
-            # derived Z so the reader can see the Z response directly.
+            # derived Z + pose convention marker ("lbs" vs "ext" for
+            # external-R) so the reader can tell which demo they're
+            # looking at without referring back to the filename.
+            pose_tag = "lbs" if use_lbs_pose else "ext"
             hud = (f"f={p.idx:05d}  det={int(r.detected)}  "
-                   f"bbox={bs_used:6.1f}px  Z={t[2]:7.3f}")
+                   f"bbox={bs_used:6.1f}px  Z={t[2]:7.3f}  pose={pose_tag}")
             _draw_hud(frame_bgr, hud)
 
             writer.write(frame_bgr)
@@ -308,22 +324,48 @@ def _load_flame(device: str):
 
 def _rebuild_camera(r, w: int, h: int, focal_px: float,
                     bbox_center: np.ndarray | None = None,
-                    bbox_size: float | None = None):
+                    bbox_size: float | None = None,
+                    use_lbs_pose: bool = False):
     """Rebuild (K, R, t) from a FrameResult. `bbox_center` / `bbox_size`
     can be overridden by the caller (used by --lock-bbox / --smooth-bbox
     to feed a stabilized bbox into `_build_t` without mutating the
     FrameResult itself).
+
+    When `use_lbs_pose=True`, the caller will apply `pose_params` via
+    FLAME's LBS kinematic chain inside `forward_geo`, so the external R
+    must NOT also carry the pose rotation. We return R as the pure
+    OpenGL->OpenCV coordinate flip in that case. This matches SMIRK's
+    own demo convention (pose rotates around the root joint, not around
+    the FLAME canonical origin) and is the most faithful way to
+    visualise SMIRK outputs; the tradeoff is that this differs from the
+    convention FlashAvatar's training pipeline uses, so the resulting
+    mesh alignment doesn't tell you what FlashAvatar will actually
+    render. `.frame` files are unaffected.
     """
-    from preprocess.smirk_convert import _build_K, _build_R, _build_t
+    from preprocess.smirk_convert import (
+        _build_K, _build_R, _build_t, _GL_TO_CV,
+    )
     bc = r.bbox_center if bbox_center is None else bbox_center
     bs = r.bbox_size if bbox_size is None else bbox_size
     K = _build_K(w, h, focal_px)
-    R = _build_R(r.pose_params)
+    if use_lbs_pose:
+        # Pose is applied via LBS inside forward_geo; R is coord flip only.
+        R = _GL_TO_CV.copy()
+    else:
+        R = _build_R(r.pose_params)
     t = _build_t(r.cam, bc, bs, w, h, focal_px)
     return K, R, t
 
 
-def _project_flame_mesh(flame, shape_np, r, K, R, t, cfg) -> np.ndarray:
+def _project_flame_mesh(flame, shape_np, r, K, R, t, cfg,
+                        use_lbs_pose: bool = False) -> np.ndarray:
+    """Project the per-frame FLAME mesh into full-frame pixel coords.
+
+    When `use_lbs_pose=True`, `pose_params` is passed into `forward_geo`
+    as `rot_params`, so the returned vertices are already rotated around
+    the FLAME root joint via LBS (matching SMIRK's demo rendering). The
+    caller is expected to have built `R` as the plain GL->CV coord flip.
+    """
     from preprocess.smirk_convert import (
         _pad_expression, _axis_angle_to_rot6d, _default_eye_pose_6d,
         eye_pose_6d_from_blendshapes,
@@ -345,11 +387,21 @@ def _project_flame_mesh(flame, shape_np, r, K, R, t, cfg) -> np.ndarray:
         else:
             eyes_np = _default_eye_pose_6d()
         eyes_t = torch.from_numpy(eyes_np).float().unsqueeze(0).to(device)
+
+        rot_kwargs = {}
+        if use_lbs_pose:
+            # Push the SMIRK-predicted global pose into FLAME's kinematic
+            # tree so LBS rotates around the root joint. This gives the
+            # same rendering convention as SMIRK's own demo_video.py.
+            rot_kwargs["rot_params"] = torch.from_numpy(
+                _axis_angle_to_rot6d(r.pose_params),
+            ).float().unsqueeze(0).to(device)
         verts = flame.forward_geo(
             shape_t, expression_params=exp_t,
             jaw_pose_params=jaw_t, eye_pose_params=eyes_t,
             eyelid_params=eyelid_t,
-        )[0].cpu().numpy()  # (V, 3) canonical frame
+            **rot_kwargs,
+        )[0].cpu().numpy()  # (V, 3) FLAME frame (posed or canonical)
 
     X_cam = (R @ verts.T).T + t[None, :]
     X_pix = (K @ X_cam.T).T

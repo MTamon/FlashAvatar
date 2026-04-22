@@ -203,6 +203,17 @@ def build_argparser() -> argparse.ArgumentParser:
                          "no-op (N=0) and --demo-lock-bbox. Offline-only — "
                          "this is a jitter-attribution tool, not the path "
                          "used to generate training data.")
+    sm.add_argument("--demo-lbs-pose", action="store_true",
+                    help="Diagnostic (requires --demo-video): render the "
+                         "FLAME mesh with SMIRK's own demo convention — "
+                         "apply `pose_params` inside FLAME's LBS kinematic "
+                         "tree (rotation around the root joint) instead of "
+                         "externally as an `R @ verts` matmul around the "
+                         "canonical origin. This isolates the true "
+                         "per-frame SMIRK encoder jitter from the "
+                         "\"origin rotation\" amplification that "
+                         "FlashAvatar's default convention introduces at "
+                         "render time. Does NOT affect the `.frame` files.")
 
     return p
 
@@ -395,7 +406,8 @@ def cmd_smirk(args: argparse.Namespace) -> int:
                       demo_path=args.demo_video,
                       demo_fps=args.demo_fps,
                       demo_lock_bbox=args.demo_lock_bbox,
-                      demo_smooth_bbox=args.demo_smooth_bbox)
+                      demo_smooth_bbox=args.demo_smooth_bbox,
+                      demo_lbs_pose=args.demo_lbs_pose)
     print(f"[smirk] wrote {n} .frame files")
     print(f"[smirk] next: python scripts/preprocess.py finalize "
           f"--idname {args.idname}")
