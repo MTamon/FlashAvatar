@@ -803,17 +803,32 @@ python scripts/preprocess.py smirk --idname <idname>
   VIDEO トラッキング状態が二重に進行するのを避け、決定性を保つためです。
 - **`eye-mode blendshapes`** や FLAME `--lpf-*` との併用は自由。どちらも
   本機能と直交します。
-- **安定部分集合のサイズ補正（PR #8）**：安定ランドマーク部分集合は
-  口・顎・眉・額を含まないため、縦方向の extent は全顔の ~30% しかあり
-  ません。そのまま `(width + height) / 2` で `size` を求めると legacy
-  ベースラインの ~60% のクロップになり、`_build_t` を通すと**再投影された
-  FLAME メッシュと頂点点群が縦横ともに縮小されて**見えます（本タスクで
-  報告された `demo_lbs.mp4` の vertex_point 縮小は直接これが原因）。
-  SMIRK `release/cuda128` PR #8 は `extract_bbox_center_size(...,
-  size_calibration=1.55)` を導入し、安定部分集合モードでも legacy と
-  同じクロップ extent を出すようにしました。FlashAvatar は
-  `SmirkConfig.size_calibration` / `--bbox-size-calibration` 経由でこの値を
-  そのまま素通しで渡し、未指定時は SMIRK 側の既定 `1.55` を使います。
+- **安定部分集合のサイズ補正（PR #8）と `bbox_size` 単位整合**：
+  安定ランドマーク部分集合は口・顎・眉・額を含まないため、縦方向の
+  extent は全顔の ~30% しかありません。これを 2 段階で補正しないと
+  `demo_lbs.mp4` の **緑点群（FLAME 再投影）が実際の顔より小さく**
+  描画されます。
+    1. **PR #8 の `size_calibration`（顔 extent の補正）**：SMIRK
+       `release/cuda128` PR #8 は `extract_bbox_center_size(...,
+       size_calibration=1.55)` を導入し、安定部分集合の顔 extent を
+       全ランドマーク extent と等価まで戻します。FlashAvatar は
+       `SmirkConfig.size_calibration` / `--bbox-size-calibration` 経由で
+       素通しで渡し、未指定時は SMIRK 側の既定 `1.55` を使います。
+    2. **`crop_scale` を `bbox_size` に乗ずる単位整合**：legacy
+       `_crop_224` は `bbox_size = old_size * crop_scale`（実クロップの
+       full-frame 辺長）を返し、`_build_t` の `k = bbox_size / 223` も
+       この単位を前提に書かれています。一方 SMIRK の
+       `extract_bbox_center_size` は `crop_scale` を**含まない**「顔
+       extent」を返す（`build_similarity_tform` が内部で `* scale` する
+       規約）ため、PR #8 の calibration だけでは online/offline の
+       `bbox_size` が legacy の `1/scale ≈ 71%` にしかならず、
+       `Z = f_px / (s * HALF_PROJ * (bbox_size / 223))` 経由で
+       FLAME メッシュが約 71% スケールに縮小されて見えます。
+       `_run_online` / `_run_offline` で `bbox_size` を保存する直前に
+       `* cfg.crop_scale` を掛けて legacy 単位に揃えています
+       （この補正は `FrameResult.bbox_size` の docstring に固定）。
+  これら 2 補正の合算で、online/offline モードでも legacy と同じ
+  full-frame 縮尺で FLAME メッシュ・頂点が描画されます。
   旧 SMIRK チェックアウト（PR #8 以前）では `load_bbox_tracker` が
   **明示的に RuntimeError を投げ**、`git pull` の指示を出します
   （silently に 60% クロップで学習が進むより fail-loud 優先）。

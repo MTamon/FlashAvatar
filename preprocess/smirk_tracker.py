@@ -297,11 +297,25 @@ def _run_online(cfg: SmirkConfig, runner, frames: list[Path]
             lm, bs, detected = runner.detect_with_fallback(img)
             tform, center, size = tracker.update(lm)
             crop = runner.crop_224_with_tform(img, tform)
+            # `bbox_size` semantics: legacy `_crop_224` stores `old_size *
+            # crop_scale` (= the actual crop region's full-frame side
+            # length, padding included), and `_build_t` / `_draw_bbox`
+            # downstream are written against that convention. SMIRK's
+            # `extract_bbox_center_size` returns the bare face extent
+            # (calibration applied, but `crop_scale` NOT applied — see
+            # `build_similarity_tform`, which multiplies internally). We
+            # restore the legacy convention here so the same `bbox_size`
+            # semantics flow through `_build_t` regardless of bbox_mode.
+            # Without this multiplication, online/offline `bbox_size` is
+            # ~71% of legacy and the back-projected FLAME mesh appears
+            # at ~71% scale (`Z = f_px / (s * HALF_PROJ * (bbox_size /
+            # 223))` => Z grows by 1/0.71, mesh shrinks by 0.71).
+            bbox_size_full = float(size) * float(cfg.crop_scale)
             prepared.append(SimpleNamespace(
                 crop=crop,
                 tform_matrix=tform.params.astype(np.float64),
                 bbox_center=np.asarray(center, dtype=np.float64),
-                bbox_size=float(size),
+                bbox_size=bbox_size_full,
                 landmarks=lm, blendshapes=bs, detected=detected,
             ))
         results = runner.encode_prepared(prepared)
@@ -404,11 +418,17 @@ def _run_offline(cfg: SmirkConfig, runner, frames: list[Path]
             idx = i + j
             tform = precomputed_tforms[idx]
             crop = runner.crop_224_with_tform(img, tform)
+            # See comment in `_run_online`: legacy `bbox_size` is the
+            # actual crop side length (`old_size * crop_scale`), whereas
+            # SMIRK's `extract_bbox_center_size` returns just the face
+            # extent. Multiply here so `_build_t` / `_draw_bbox` see a
+            # consistent unit across all bbox modes.
+            bbox_size_full = float(smooth_sizes[idx]) * float(cfg.crop_scale)
             prepared.append(SimpleNamespace(
                 crop=crop,
                 tform_matrix=tform.params.astype(np.float64),
                 bbox_center=smooth_centers[idx],
-                bbox_size=float(smooth_sizes[idx]),
+                bbox_size=bbox_size_full,
                 landmarks=lm_cache[idx],
                 blendshapes=bs_cache[idx],
                 detected=detected_cache[idx],
