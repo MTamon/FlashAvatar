@@ -214,6 +214,35 @@ def build_argparser() -> argparse.ArgumentParser:
                          "\"origin rotation\" amplification that "
                          "FlashAvatar's default convention introduces at "
                          "render time. Does NOT affect the `.frame` files.")
+    # --- temporal LPF ---
+    sm.add_argument("--lpf-cutoff", type=float, default=None, metavar="HZ",
+                    help="Enable a zero-phase FIR low-pass filter over the "
+                         "frame sequence for selected FLAME channels. "
+                         "Cutoff frequency in Hz (e.g. 2.0). Requires "
+                         "--lpf-fps. Intended for preparing Listening Head "
+                         "Generation teacher data: velocity / acceleration "
+                         "features amplify sub-pixel SMIRK jitter, so the "
+                         "raw per-frame output needs smoothing offline. "
+                         "Affects the `.frame` files AND the demo overlay.")
+    sm.add_argument("--lpf-fps", type=float, default=None, metavar="HZ",
+                    help="Source video fps used to normalize --lpf-cutoff "
+                         "against Nyquist. Required whenever --lpf-cutoff "
+                         "is given (the tracker itself is frame-indexed "
+                         "and doesn't otherwise know the fps).")
+    sm.add_argument("--lpf-window-sec", type=float, default=1.0,
+                    metavar="SEC",
+                    help="FIR filter window length in seconds "
+                         "(default 1.0). Filter taps = round(window_sec * "
+                         "lpf_fps), rounded up to the nearest odd integer "
+                         "for symmetry.")
+    sm.add_argument("--lpf-channels", type=str, default="cam,pose",
+                    metavar="LIST",
+                    help="Comma-separated FLAME channels to smooth "
+                         "(default: cam,pose). Available: cam, pose, exp, "
+                         "jaw, eyelids. `cam,pose` tackles the rendering-"
+                         "convention jitter; add `exp,jaw,eyelids` if the "
+                         "consumer (e.g. Listening Head Gen velocity "
+                         "features) also needs smooth expression tracks.")
 
     return p
 
@@ -400,6 +429,22 @@ def cmd_smirk(args: argparse.Namespace) -> int:
         overwrite=args.overwrite,
         eye_mode=args.eye_mode,
     )
+
+    lpf_cfg = None
+    if args.lpf_cutoff is not None:
+        if args.lpf_fps is None:
+            print("error: --lpf-cutoff requires --lpf-fps.", file=sys.stderr)
+            return 1
+        from preprocess.smirk_lpf import LpfConfig
+        channels = tuple(c.strip() for c in args.lpf_channels.split(",")
+                         if c.strip())
+        lpf_cfg = LpfConfig(
+            cutoff_hz=args.lpf_cutoff,
+            fps=args.lpf_fps,
+            window_sec=args.lpf_window_sec,
+            channels=channels,
+        )
+
     print(f"[smirk] {raw_imgs} -> {ckpt_raw}")
     n = smirk_mod.run(cfg, raw_imgs, ckpt_raw,
                       verify_dir=args.verify_dir,
@@ -407,7 +452,8 @@ def cmd_smirk(args: argparse.Namespace) -> int:
                       demo_fps=args.demo_fps,
                       demo_lock_bbox=args.demo_lock_bbox,
                       demo_smooth_bbox=args.demo_smooth_bbox,
-                      demo_lbs_pose=args.demo_lbs_pose)
+                      demo_lbs_pose=args.demo_lbs_pose,
+                      lpf_cfg=lpf_cfg)
     print(f"[smirk] wrote {n} .frame files")
     print(f"[smirk] next: python scripts/preprocess.py finalize "
           f"--idname {args.idname}")

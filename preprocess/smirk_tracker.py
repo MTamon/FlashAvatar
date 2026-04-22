@@ -51,10 +51,17 @@ def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
         demo_fps: float = 25.0,
         demo_lock_bbox: bool = False,
         demo_smooth_bbox: int = 0,
-        demo_lbs_pose: bool = False) -> int:
+        demo_lbs_pose: bool = False,
+        lpf_cfg=None) -> int:
     """Drive the whole tracker: detect+crop+encode+convert+write.
 
     Returns the number of `.frame` files written.
+
+    `lpf_cfg` is an optional `preprocess.smirk_lpf.LpfConfig`. When
+    supplied, a zero-phase FIR LPF is applied across the frame sequence
+    to the configured FLAME channels before `.frame` files are written
+    AND before the demo / verify overlays are rendered, so the smoothed
+    values feed into every downstream consumer in one place.
     """
     # Lazy import: these modules live inside external/smirk and we don't want
     # to force users who never touch SMIRK to have it installed.
@@ -85,6 +92,16 @@ def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
             payloads.append(FramePayload(
                 idx=i + j, src_path=batch[j], result=r,
             ))
+
+    # Pass 1.5 (optional): temporal LPF on selected FLAME channels.
+    # Runs after encode so we have the full sequence in memory, but
+    # before shape canonicalization (shape is identity-constant and isn't
+    # in the LPF channel set; order doesn't affect it) and before the
+    # .frame writer so the smoothed values land in both the on-disk
+    # .frame files and the demo overlays.
+    if lpf_cfg is not None:
+        from preprocess.smirk_lpf import smooth_payloads
+        smooth_payloads(payloads, lpf_cfg)
 
     # Pass 2: canonicalize FLAME shape over a subset of frames; write.
     shape = canonicalize_shape(payloads, cfg.shape_frames)
