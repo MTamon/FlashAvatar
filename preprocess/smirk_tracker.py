@@ -72,6 +72,16 @@ class SmirkConfig:
     offline_size_cutoff: float = 2.5
     offline_size_taps: int = 61
     offline_center_cutoff: float | None = None
+    # Stable-subset size calibration (SMIRK release/cuda128 PR #8). Without
+    # this, the stable-landmark subset — which intentionally drops mouth /
+    # jaw / eyebrows / forehead — produces a bbox whose vertical extent is
+    # only ~30% of the full face, so `--bbox-mode online/offline` crops a
+    # region ~60% the size of `legacy` and every projected FLAME vertex
+    # appears shrunk in the overlay / rendered output. `None` (the default)
+    # defers to SMIRK's own default constant `STABLE_LANDMARK_SIZE_CALIBRATION`
+    # (currently 1.55), which matches the legacy crop extent empirically.
+    # Pass `1.0` to disable the compensation for A/B diagnostics.
+    size_calibration: float | None = None
 
 
 def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
@@ -256,6 +266,7 @@ def _run_online(cfg: SmirkConfig, runner, frames: list[Path]
         image_size=cfg.crop_size,
         scale=cfg.crop_scale,
         use_stable_subset=not cfg.bbox_all_landmarks,
+        size_calibration=cfg.size_calibration,
         size_min_cutoff=cfg.online_size_min_cutoff,
         size_beta=cfg.online_size_beta,
         center_min_cutoff=cfg.online_center_cutoff,
@@ -332,8 +343,14 @@ def _run_offline(cfg: SmirkConfig, runner, frames: list[Path]
             h, w = img.shape[:2]
             img_size = (w, h)
         lm, bs, detected = runner.detect_with_fallback(img)
+        # `size_calibration=None` defers to SMIRK's default 1.55 when the
+        # stable subset is in use (PR #8), which rescales the subset-derived
+        # size to cover the same face extent as the legacy all-landmarks
+        # bbox. Skipping this would shrink the crop (and therefore every
+        # downstream FLAME vertex projection) by ~40%.
         c, s = bbox_mod.extract_bbox_center_size(
             lm, use_stable_subset=use_subset,
+            size_calibration=cfg.size_calibration,
         )
         lm_cache.append(lm)
         bs_cache.append(bs)

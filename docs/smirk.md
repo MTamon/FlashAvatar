@@ -754,6 +754,7 @@ python scripts/preprocess.py smirk --idname <idname>
 |---|---|---|
 | `--bbox-mode` | `legacy` | `legacy` / `online` / `offline`。既存 `.frame` とのビット互換維持が必要なら `legacy`。 |
 | `--bbox-all-landmarks` | off | 安定部分集合を使わず全ランドマーク min/max に戻す。安定部分集合が顔以外に落ちる特殊ケースの救済弁。通常は既定のまま。 |
+| `--bbox-size-calibration SCALE` | なし（SMIRK 既定 `1.55`） | **安定部分集合**で導出した `size` を legacy 相当のクロップ範囲に合わせるための補正倍率（SMIRK `release/cuda128` PR #8）。安定部分集合は口・顎・眉・額を含まないため、そのまま使うと縦方向の extent が全顔の ~30% しかなく、`online` / `offline` の crop が `legacy` の ~60% の大きさにしかなりません。その結果、再投影された FLAME メッシュや `_draw_mesh` で描かれる**頂点点群が縮小されて**見えます（本バグの直接原因）。未指定のままで SMIRK 側の既定 `STABLE_LANDMARK_SIZE_CALIBRATION = 1.55` が使われ、legacy の crop extent に一致します。診断目的で補正を無効化したいときは `1.0` を渡します。`--bbox-all-landmarks` 指定時や `legacy` モード時は no-op。 |
 | `--bbox-fps HZ` | なし | 映像 FPS。`online` / `offline` で**必須**。cutoff の Nyquist 正規化に使う。 |
 | `--online-size-min-cutoff HZ` | 1.0 | One-Euro の静止時カットオフ。小さいほど静止時に強く平滑化。 |
 | `--online-size-beta` | 0.02 | One-Euro の速度感度。大きいほど速い動きで素早く追従。 |
@@ -799,6 +800,20 @@ python scripts/preprocess.py smirk --idname <idname>
   VIDEO トラッキング状態が二重に進行するのを避け、決定性を保つためです。
 - **`eye-mode blendshapes`** や FLAME `--lpf-*` との併用は自由。どちらも
   本機能と直交します。
+- **安定部分集合のサイズ補正（PR #8）**：安定ランドマーク部分集合は
+  口・顎・眉・額を含まないため、縦方向の extent は全顔の ~30% しかあり
+  ません。そのまま `(width + height) / 2` で `size` を求めると legacy
+  ベースラインの ~60% のクロップになり、`_build_t` を通すと**再投影された
+  FLAME メッシュと頂点点群が縦横ともに縮小されて**見えます（本タスクで
+  報告された `demo_lbs.mp4` の vertex_point 縮小は直接これが原因）。
+  SMIRK `release/cuda128` PR #8 は `extract_bbox_center_size(...,
+  size_calibration=1.55)` を導入し、安定部分集合モードでも legacy と
+  同じクロップ extent を出すようにしました。FlashAvatar は
+  `SmirkConfig.size_calibration` / `--bbox-size-calibration` 経由でこの値を
+  そのまま素通しで渡し、未指定時は SMIRK 側の既定 `1.55` を使います。
+  旧 SMIRK チェックアウト（PR #8 以前）では `load_bbox_tracker` が
+  **明示的に RuntimeError を投げ**、`git pull` の指示を出します
+  （silently に 60% クロップで学習が進むより fail-loud 優先）。
 
 ### demo 用フラグとの関係
 
@@ -844,6 +859,9 @@ python scripts/preprocess.py smirk --idname Mikawa3 \
     --demo-video dataset/Mikawa3/smirk_demo/demo_lbs.mp4 --demo-fps 30
 # 既存 .frame を上書き再生成したい場合は `--overwrite` を追加。
 # 旧互換で `--demo-lbs-pose` を残しても no-op として受理されます。
+# `--bbox-size-calibration` は未指定で OK（SMIRK 側の 1.55 が自動で掛かり、
+# legacy と同じクロップ extent になります）。旧 SMIRK チェックアウトでは
+# ロード時に明示エラーとなるので、指示に従って `git pull` してください。
 ```
 
 ## 時間方向 LPF（`--lpf-cutoff`）

@@ -248,6 +248,23 @@ def build_argparser() -> argparse.ArgumentParser:
                          "for sequences where the stable subset ends up "
                          "on non-face regions — normally you want the "
                          "default (stable subset on).")
+    sm.add_argument("--bbox-size-calibration", type=float, default=None,
+                    metavar="SCALE",
+                    help="Rescale the stable-subset bbox size so its "
+                         "crop extent matches the legacy all-landmarks "
+                         "crop. The stable subset skips mouth / jaw / "
+                         "forehead, so its vertical extent is only ~30% "
+                         "of the full face and an uncalibrated online / "
+                         "offline crop covers ~60% of what legacy did — "
+                         "the reprojected FLAME mesh (and every vertex "
+                         "point drawn on the demo overlay) ends up "
+                         "visibly shrunk. Default: unset = use SMIRK's "
+                         "built-in `STABLE_LANDMARK_SIZE_CALIBRATION` "
+                         "(1.55, tuned to match legacy crop extent). "
+                         "Pass 1.0 to disable compensation for A/B "
+                         "diagnostics against pre-PR#8 outputs. Only "
+                         "relevant under --bbox-mode online / offline "
+                         "with the stable subset on (the default).")
     sm.add_argument("--bbox-fps", type=float, default=None,
                     help="Source video fps, required for --bbox-mode "
                          "online / offline. The One-Euro and FIR cutoffs "
@@ -526,6 +543,7 @@ def cmd_smirk(args: argparse.Namespace) -> int:
         offline_size_cutoff=args.offline_size_cutoff,
         offline_size_taps=args.offline_size_taps,
         offline_center_cutoff=args.offline_center_cutoff,
+        size_calibration=args.bbox_size_calibration,
     )
 
     lpf_cfg = None
