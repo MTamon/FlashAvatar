@@ -26,7 +26,15 @@ class _Prepared:
     crop: np.ndarray            # uint8 (224, 224, 3) RGB
     tform_matrix: np.ndarray    # (3, 3) full-frame px -> crop px
     bbox_center: np.ndarray     # (2,) full-frame center of the crop bbox
-    bbox_size: float            # full-frame side length of the crop bbox
+    # **Side length of the actual 224 crop region in full-frame pixels**,
+    # i.e. legacy `_crop_224`'s `s = old_size * crop_scale`. NOT the bare
+    # face extent — `_build_t` and `_draw_bbox` both depend on this unit.
+    # SMIRK PR #8's `extract_bbox_center_size` returns just `face_extent
+    # * size_calibration` (without `crop_scale`, because
+    # `build_similarity_tform` multiplies by `scale` internally), so the
+    # online / offline encode loops MUST multiply by `cfg.crop_scale`
+    # before constructing this record.
+    bbox_size: float
     landmarks: np.ndarray | None
     blendshapes: dict
     detected: bool
@@ -44,7 +52,10 @@ class FrameResult:
     # Crop geometry (similarity tform mapping full-frame -> 224 crop):
     tform_matrix: np.ndarray      # (3, 3) full-frame px -> 224 crop px
     bbox_center: np.ndarray       # (2,) full-frame center of the crop bbox
-    bbox_size: float              # full-frame side length of the crop bbox
+    # Same convention as `_Prepared.bbox_size`: full-frame side length of
+    # the actual 224 crop region (= `face_extent * crop_scale`), NOT the
+    # bare face extent. See `_Prepared` docstring for details.
+    bbox_size: float
     detected: bool = True         # False => we re-used the previous crop
     # MediaPipe landmarks in full-frame pixels (N, 2). Kept around so the
     # demo/verify tools can draw them without re-running MediaPipe. May be
