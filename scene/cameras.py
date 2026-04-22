@@ -18,6 +18,7 @@ class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, head_mask, mouth_mask,
                  exp_param, eyes_pose, eyelids, jaw_pose,
                  image_name, uid,
+                 head_pose=None,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda"
                  ):
         super(Camera, self).__init__()
@@ -46,6 +47,17 @@ class Camera(nn.Module):
         self.eyes_pose = eyes_pose.to(self.data_device)
         self.eyelids = eyelids.to(self.data_device)
         self.jaw_pose = jaw_pose.to(self.data_device)
+        # Global head rotation (rot6d) applied via FLAME LBS. None means
+        # "legacy .frame without flame.pose" — Scene_mica populates the
+        # identity rot6d in that case so deform_model doesn't have to
+        # special-case missing head_pose. Kept as an optional arg so
+        # third-party Camera constructors that pre-date the LBS fix still
+        # work (they get identity pose via the default path below).
+        if head_pose is None:
+            head_pose = torch.tensor(
+                [[1., 0., 0., 0., 1., 0.]], dtype=torch.float32,
+            )
+        self.head_pose = head_pose.to(self.data_device)
 
         self.zfar = 100.0
         self.znear = 0.01

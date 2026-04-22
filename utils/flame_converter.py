@@ -239,6 +239,7 @@ class FlameConverter:
         shape = self._convert_shape(tracker_output)
         exp = self._convert_expression(tracker_output)
         jaw = self._convert_jaw(tracker_output)
+        head_pose = self._convert_head_pose(tracker_output)
         eyes = self._convert_eyes(tracker_output)
         eyelids = self._convert_eyelids(tracker_output)
 
@@ -260,6 +261,15 @@ class FlameConverter:
             "flame": {
                 "shape": shape,
                 "exp": exp,
+                # Global head rotation (rot6d) applied via FLAME LBS at
+                # render time. `weak_perspective_to_full` below returns
+                # R=identity (pose has never been folded into the
+                # realtime-path R), so if we didn't surface pose here it
+                # would be LOST by scene/deform_model. Populating this
+                # field lets the LBS fix in `src/deform_model.py::decode`
+                # apply head rotation correctly around the root joint
+                # regardless of which tracker fed this converter.
+                "pose": head_pose,
                 "jaw": jaw,
                 "eyes": eyes,
                 "eyelids": eyelids,
@@ -282,7 +292,15 @@ class FlameConverter:
         -------
         codedict compatible with ``DeformModel.decode()``:
             shape (1, 300), expr (1, 100), jaw_pose (1, 6),
-            eyes_pose (1, 12), eyelids (1, 2).
+            eyes_pose (1, 12), eyelids (1, 2), head_pose (1, 6).
+
+        ``head_pose`` is the global head rotation in rot6d — consumed via
+        `flame.forward_geo(rot_params=...)` inside `DeformModel.decode`.
+        Before the LBS-default fix this key was absent, and head pose was
+        effectively dropped (the realtime converter's R is identity, so
+        nothing else was rotating the mesh). Back-compat callers that
+        ignore this key continue to work because `decode` falls back to
+        identity rot6d when `head_pose` is missing.
         """
         return {
             "shape": self._convert_shape(tracker_output),
@@ -290,6 +308,7 @@ class FlameConverter:
             "jaw_pose": self._convert_jaw(tracker_output),
             "eyes_pose": self._convert_eyes(tracker_output),
             "eyelids": self._convert_eyelids(tracker_output),
+            "head_pose": self._convert_head_pose(tracker_output),
         }
 
     # ----- internal conversions -----
@@ -322,6 +341,22 @@ class FlameConverter:
         s, e = self.cfg.jaw_slice
         jaw_aa = pose[:, s:e]                    # (B, 3) axis-angle
         return axis_angle_to_rot6d(jaw_aa)        # (B, 6)
+
+    def _convert_head_pose(self, d: dict) -> torch.Tensor:
+        """Extract global head rotation (rot6d) from the tracker's pose
+        vector. Slices the `global_pose_slice` of the raw axis-angle pose
+        (first 3 components for DECA/EMOCA/SMIRK/SPARK) and converts to
+        pytorch3d rot6d, matching what `flame.forward_geo(rot_params=...)`
+        expects.
+        """
+        if self.cfg.pose_key not in d:
+            return identity_rot6d(1, self.device)
+        pose = self._get(d, self.cfg.pose_key)
+        if pose.dim() == 1:
+            pose = pose.unsqueeze(0)
+        s, e = self.cfg.global_pose_slice
+        head_aa = pose[:, s:e]                    # (B, 3) axis-angle
+        return axis_angle_to_rot6d(head_aa)        # (B, 6)
 
     def _convert_eyes(self, d: dict) -> torch.Tensor:
         if self.cfg.has_eyes and self.cfg.eyes_key in d:

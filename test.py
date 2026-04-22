@@ -151,6 +151,7 @@ if __name__ == "__main__":
         codedict['eyes_pose'] = viewpoint_cam.eyes_pose
         codedict['eyelids'] = viewpoint_cam.eyelids
         codedict['jaw_pose'] = viewpoint_cam.jaw_pose
+        codedict['head_pose'] = viewpoint_cam.head_pose
         verts_final, rot_delta, scale_coef = DeformModel.decode(codedict)
         gaussians.update_xyz_rot_scale(verts_final[0], rot_delta[0], scale_coef[0])
 

@@ -204,16 +204,23 @@ def build_argparser() -> argparse.ArgumentParser:
                          "this is a jitter-attribution tool, not the path "
                          "used to generate training data.")
     sm.add_argument("--demo-lbs-pose", action="store_true",
-                    help="Diagnostic (requires --demo-video): render the "
-                         "FLAME mesh with SMIRK's own demo convention — "
-                         "apply `pose_params` inside FLAME's LBS kinematic "
-                         "tree (rotation around the root joint) instead of "
-                         "externally as an `R @ verts` matmul around the "
-                         "canonical origin. This isolates the true "
-                         "per-frame SMIRK encoder jitter from the "
-                         "\"origin rotation\" amplification that "
-                         "FlashAvatar's default convention introduces at "
-                         "render time. Does NOT affect the `.frame` files.")
+                    help="DEPRECATED no-op (LBS is now the default). Kept "
+                         "as an accepted flag so existing scripts / doc "
+                         "invocations keep working. Use `--demo-ext-pose` "
+                         "to opt IN to the legacy \"pose folded into "
+                         "external R\" convention for A/B diagnostics.")
+    sm.add_argument("--demo-ext-pose", action="store_true",
+                    help="Diagnostic (requires --demo-video): force the "
+                         "legacy pre-fix rendering convention — apply "
+                         "`pose_params` as an `R @ verts` matmul around "
+                         "the FLAME canonical origin instead of via LBS "
+                         "root-joint rotation. This is the buggy "
+                         "\"origin-centred rotation\" path described in "
+                         "the `pose rotation center` section of "
+                         "docs/smirk.md, kept as an opt-in toggle so old "
+                         "`.frame` / checkpoint renders can be "
+                         "reproduced for comparison. Does NOT affect "
+                         "the `.frame` output.")
     # --- bbox stabilization (SMIRK release/cuda128 PR #7) ---
     # Affects the crop that SMIRK actually encodes, which in turn drives
     # cam / bbox_size / t and therefore the whole rendered result. Unlike
@@ -537,13 +544,17 @@ def cmd_smirk(args: argparse.Namespace) -> int:
         )
 
     print(f"[smirk] {raw_imgs} -> {ckpt_raw}")
+    # --demo-lbs-pose is a deprecated no-op; LBS is now the default so the
+    # flag's presence doesn't change anything. --demo-ext-pose opts in to
+    # the legacy pre-fix convention for A/B diagnostics.
     n = smirk_mod.run(cfg, raw_imgs, ckpt_raw,
                       verify_dir=args.verify_dir,
                       demo_path=args.demo_video,
                       demo_fps=args.demo_fps,
                       demo_lock_bbox=args.demo_lock_bbox,
                       demo_smooth_bbox=args.demo_smooth_bbox,
-                      demo_lbs_pose=args.demo_lbs_pose,
+                      demo_lbs_pose=True,
+                      demo_ext_pose=args.demo_ext_pose,
                       lpf_cfg=lpf_cfg)
     print(f"[smirk] wrote {n} .frame files")
     print(f"[smirk] next: python scripts/preprocess.py finalize "

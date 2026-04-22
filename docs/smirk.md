@@ -422,38 +422,44 @@ python scripts/preprocess.py finalize --idname <idname>
 
 SMIRK ステップに `--demo-video` を追加すると、元フレームに **bbox・
 MediaPipe ランドマーク・FLAME メッシュ再投影**を重ね書きした mp4 と、
-フレームごとの jitter 指標（`*_stats.csv`）が出ます。`.frame` 出力には
-影響しません（`--demo-lbs-pose` などの `--demo-*` フラグは描画側のみ）。
+フレームごとの jitter 指標（`*_stats.csv`）が出ます。
+`.frame` 出力には影響しません（`--demo-*` 系は描画側のみ）。
 
-本タスクで共有されたコマンド（bbox 安定化を有効化した最終形）：
+**レンダリング convention は LBS が既定**になりました（`pose_params` を
+FLAME の root joint を中心に LBS で適用）。旧挙動（`pose` を外部 R に
+畳み込む「原点中心回転」）は `--demo-ext-pose` で opt-in できます。
+`--demo-lbs-pose` は deprecated ですが、**既定が LBS なので no-op として
+受け付けられます**（既存スクリプトはそのまま動きます）。
+
+本タスクで共有されたコマンド（LBS 既定化 + bbox 安定化を有効化した最終形）：
 
 ```bash
-# bbox 安定化 + LBS convention での再投影
+# LBS convention（既定）+ bbox 安定化
 python scripts/preprocess.py smirk --idname Mikawa3 \
     --bbox-mode offline --bbox-fps 30 \
-    --demo-video dataset/Mikawa3/smirk_demo/demo_lbs.mp4 --demo-fps 30 \
-    --demo-lbs-pose
+    --demo-video dataset/Mikawa3/smirk_demo/demo_lbs.mp4 --demo-fps 30
+# `--demo-lbs-pose` はもう不要です（書いても no-op として受理されます）。
 # 既存 `.frame` を再生成したい場合は `--overwrite` を追加。
 ```
 
 比較用の追加パターン（必要なら並べて見比べる）：
 
 ```bash
-# baseline: bbox 安定化なし・FlashAvatar 既定 convention
+# baseline: bbox 安定化なし・LBS 既定
 python scripts/preprocess.py smirk --idname <idname> \
-    --demo-video dataset/<idname>/smirk_demo/demo_legacy.mp4 --demo-fps <fps>
+    --demo-video dataset/<idname>/smirk_demo/demo_baseline.mp4 --demo-fps <fps>
 
-# bbox 安定化あり・FlashAvatar 既定 convention（ext-R）
-python scripts/preprocess.py smirk --idname <idname> \
-    --bbox-mode offline --bbox-fps <fps> \
-    --demo-video dataset/<idname>/smirk_demo/demo_ext.mp4 --demo-fps <fps> \
-    --overwrite
-
-# bbox 安定化あり・LBS convention（SMIRK 公式と同じ、回転中心問題を回避）
+# bbox 安定化あり・LBS 既定（推奨）
 python scripts/preprocess.py smirk --idname <idname> \
     --bbox-mode offline --bbox-fps <fps> \
     --demo-video dataset/<idname>/smirk_demo/demo_lbs.mp4 --demo-fps <fps> \
-    --demo-lbs-pose --overwrite
+    --overwrite
+
+# 旧 ext-R convention の再現（診断目的。通常は使わない）
+python scripts/preprocess.py smirk --idname <idname> \
+    --bbox-mode offline --bbox-fps <fps> \
+    --demo-video dataset/<idname>/smirk_demo/demo_ext.mp4 --demo-fps <fps> \
+    --demo-ext-pose --overwrite
 ```
 
 **補助フラグ（いずれも demo 描画専用で `.frame` に影響なし）：**
@@ -461,8 +467,10 @@ python scripts/preprocess.py smirk --idname <idname> \
 - `--demo-lock-bbox` — 先頭フレームの bbox を全フレームに固定。残存 jitter が
   encoder 由来か bbox 由来かを切り分ける。
 - `--demo-smooth-bbox N` — `(2N+1)` フレーム中心平均。lock と baseline の中間。
-- `--demo-lbs-pose` — `pose_params` を FLAME LBS で適用して再投影。
-  「原点中心回転」由来の系統誤差を除去して encoder 本来の揺れだけを見たい時。
+- `--demo-ext-pose` — 旧「`pose` を外部 R に畳み込む」convention で再投影。
+  既存学習済みモデルの描画を再現したい／A/B 比較したい時のみ使います。
+- `--demo-lbs-pose` — **deprecated no-op**（LBS が既定化済み）。後方互換で
+  受理されますが何もしません。
 
 ### 3. 学習
 
@@ -656,24 +664,28 @@ python scripts/preprocess.py smirk --idname <idname> \
 |---|---|
 | `--demo-lock-bbox` | 先頭フレームの `bbox_center, bbox_size` を全フレームに固定。jitter が消えれば bbox 起因、残れば SMIRK encoder 起因。 |
 | `--demo-smooth-bbox N` | `(2N+1)` フレーム中心平均 bbox。lock-bbox と no-op の中間強度。offline 診断専用（causal 制約なし）。 |
-| `--demo-lbs-pose` | `pose_params` を FLAME LBS（root joint 中心回転）経由で適用。SMIRK 公式デモと同じ convention。FlashAvatar 既定の「外部 R で原点中心回転」と比較するための診断モード。 |
+| `--demo-ext-pose` | 旧「`pose` を外部 R に畳み込む（原点中心回転）」convention で再投影。診断・A/B 比較専用。**通常は使わず LBS 既定のまま**で十分です。 |
+| `--demo-lbs-pose` | **deprecated no-op**（LBS が既定化済み）。後方互換のため受理されますが何もしません。 |
 | `--demo-fps HZ` | mp4 の再生 fps ヒント（既定 25）。SMIRK 処理はフレームインデックス駆動なのでエンコーダへの指示のみ。 |
 
 典型的な使用パターン（3 本並べて目視比較）:
 
 ```bash
-# baseline（FlashAvatar 本体と同じ convention）
+# baseline（LBS 既定・bbox も生値）
 python scripts/preprocess.py smirk --idname <idname> \
-    --demo-video demo_ext.mp4 --demo-fps 30
+    --demo-video demo_baseline.mp4 --demo-fps 30
 
-# bbox 固定で bbox 起因 jitter を消したい
+# bbox 固定で bbox 起因 jitter を切り離したい
 python scripts/preprocess.py smirk --idname <idname> \
     --demo-video demo_locked.mp4 --demo-fps 30 --demo-lock-bbox
 
-# LBS convention（SMIRK 公式と同じ、回転中心問題を切り分ける）
+# 旧 ext-R convention を再現（診断目的のみ）
 python scripts/preprocess.py smirk --idname <idname> \
-    --demo-video demo_lbs.mp4 --demo-fps 30 --demo-lbs-pose
+    --demo-video demo_ext.mp4 --demo-fps 30 --demo-ext-pose
 ```
+
+HUD の `pose=ext|lbs` 表示はそのまま残っています。既定では `lbs` と
+描画され、`--demo-ext-pose` を付けたときだけ `ext` になります。
 
 ## BBox 安定化（`--bbox-mode`）
 
@@ -797,24 +809,26 @@ python scripts/preprocess.py smirk --idname <idname>
 - jitter 源の診断が目的 → `--demo-lock-bbox` / `--demo-smooth-bbox` を使う。
 - 実際に学習・出力を改善したい → `--bbox-mode {online, offline}` を使う。
 
-`--bbox-mode` と `--demo-video` / `--demo-lbs-pose` は**併用可能**です。
-demo オーバーレイは `FrameResult.bbox_center` / `bbox_size` をそのまま
-読むため、`--bbox-mode online` / `offline` を指定した状態では demo 上の
-bbox 枠・HUD の `bbox=...`・stats CSV の `bbox_*` 列は **すべて平滑化後の
-値** になります。平滑化前後を見比べたい場合は 2 回走らせて出力を並べます。
+`--bbox-mode` と `--demo-video` は**併用可能**です。demo オーバーレイは
+`FrameResult.bbox_center` / `bbox_size` をそのまま読むため、
+`--bbox-mode online` / `offline` を指定した状態では demo 上の bbox 枠・
+HUD の `bbox=...`・stats CSV の `bbox_*` 列は **すべて平滑化後の値**
+になります。平滑化前後を見比べたい場合は 2 回走らせて出力を並べます。
+
+レンダリング convention は LBS が既定なので、`--demo-lbs-pose` のような
+opt-in フラグは不要です（書いても deprecated no-op として受理されます）。
 
 ```bash
-# 生の bbox（all-landmarks min/max、未平滑）
+# 生の bbox（all-landmarks min/max、未平滑）+ LBS 既定
 python scripts/preprocess.py smirk --idname <idname> \
     --bbox-mode legacy \
-    --demo-video dataset/<idname>/smirk_demo/demo_legacy.mp4 --demo-fps 30 \
-    --demo-lbs-pose
+    --demo-video dataset/<idname>/smirk_demo/demo_legacy.mp4 --demo-fps 30
 
-# 安定化後の bbox（stable subset + zero-phase FIR）
+# 安定化後の bbox（stable subset + zero-phase FIR）+ LBS 既定
 python scripts/preprocess.py smirk --idname <idname> \
     --bbox-mode offline --bbox-fps 30 \
     --demo-video dataset/<idname>/smirk_demo/demo_offline.mp4 --demo-fps 30 \
-    --demo-lbs-pose --overwrite
+    --overwrite
 ```
 
 なお `--demo-lock-bbox` / `--demo-smooth-bbox` を `--bbox-mode online/offline`
@@ -827,9 +841,9 @@ python scripts/preprocess.py smirk --idname <idname> \
 ```bash
 python scripts/preprocess.py smirk --idname Mikawa3 \
     --bbox-mode offline --bbox-fps 30 \
-    --demo-video dataset/Mikawa3/smirk_demo/demo_lbs.mp4 --demo-fps 30 \
-    --demo-lbs-pose
+    --demo-video dataset/Mikawa3/smirk_demo/demo_lbs.mp4 --demo-fps 30
 # 既存 .frame を上書き再生成したい場合は `--overwrite` を追加。
+# 旧互換で `--demo-lbs-pose` を残しても no-op として受理されます。
 ```
 
 ## 時間方向 LPF（`--lpf-cutoff`）
@@ -896,14 +910,14 @@ python scripts/preprocess.py smirk --idname <idname> \
   で ffmpeg に設定したもの、または原動画の FPS）。間違えると
   cutoff が意図と違う Hz になります。
 
-## 診断で判明した回転中心問題（次作業の引き継ぎ）
+## 回転中心問題（解決済み — LBS convention がデフォルト）
 
-上記 demo 機能群を使った jitter 診断で、**SMIRK 由来ではなく、
-FlashAvatar の FLAME メッシュ描画 convention 由来**の系統的 jitter
-源が判明しました。これは本セッションのスコープ外で、別タスクとして
-分離しています。概要を残します。
+> **状態：RESOLVED.** 以前は「次作業の引き継ぎ」として残していた
+> 「原点中心回転による系統的 jitter」問題を修正済みです。**LBS
+> convention が FlashAvatar 全体のデフォルト**になりました。
+> 記録のために症状・原因・どこを変えたかを残します。
 
-### 症状
+### 症状（過去）
 
 - 頭部が正面向きのときはメッシュが顔によく重なる
 - 頭部を左右に振ると、メッシュが**奥側にある**ようにズレ（z 軸方向
@@ -911,59 +925,74 @@ FlashAvatar の FLAME メッシュ描画 convention 由来**の系統的 jitter
 - 瞬き・顎の開閉の瞬間、**耳・頭頂部付近で特に顕著な位置変動**が
   発生（メッシュ全体が小さく揺れる）
 
-### 原因
+### 原因（過去）
 
 FLAME の `pose_params` は本来、**root joint を中心とした回転**
-として LBS 内部で適用される。しかし我々のパイプラインは:
+として LBS 内部で適用される。しかし修正前のパイプラインは:
 
 - `preprocess/smirk_convert.py::_build_R` — `pose` を外部 R 行列に
   畳み込み: `R = GL_TO_CV @ axis_angle_to_matrix(pose)`
-- `src/deform_model.py:120-126` — `forward_geo(rot_params=None)` で
+- `src/deform_model.py::decode` — `forward_geo(rot_params=None)` で
   canonical メッシュを得、外部 R に pose を依存
 
-の形になっていて、**原点中心の回転**として pose を適用している。
-真の root joint と canonical 原点にオフセット `J_root` があるため、
-pose 誤差 δθ に対し `δθ × J_root` ぶんの余分な並進が生じ、それが
-見かけの z 軸オフセットや瞬き連動の揺れとして可視化される。
+の形になっていて、**原点中心の回転**として pose を適用していた。
+真の root joint と canonical 原点にはオフセット `J_root` があるため、
+pose 変化 δθ に対し `δθ × J_root` ぶんの余分な並進が生じ、それが
+見かけの z 軸オフセットや瞬き連動の揺れとして可視化されていた。
 
-`--demo-lbs-pose` で LBS 経由に切り替えると、上記症状が両方とも
-消えることを確認済み。したがって原因は FlashAvatar 本体の
-レンダリング convention にあり、SMIRK エンコーダ自体の問題では
-ない。
+### 実施した修正
 
-### 必要な変更（atomic に実施）
+| ファイル | 変更内容 |
+|---|---|
+| `preprocess/smirk_convert.py::to_flashavatar_frame` | `flame_dict` に `pose`（SMIRK の `pose_params` を rot6d 化）を追加。`opencv.R` は `_GL_TO_CV`（純粋な OpenGL→OpenCV 座標反転）のみ。 |
+| `scene/__init__.py::Scene_mica` | `flame_params['pose']` があれば読み出して `head_pose` とし、`Camera` に渡す。**無ければ**単位 rot6d にフォールバック（後方互換）。 |
+| `scene/cameras.py::Camera` | `head_pose`（rot6d）を受け取り、GPU 上に保持。未指定時は単位 rot6d。 |
+| `src/deform_model.py::decode` | `codedict['head_pose']` を `flame_model.forward_geo(..., rot_params=...)` に渡し、LBS で root joint を中心に回転。未指定時は単位 rot6d。 |
+| `train.py` / `test.py` | `codedict['head_pose'] = viewpoint_cam.head_pose`。 |
+| `preprocess/smirk_verify.py` | 検証オーバーレイも LBS 経由で投影するように変更（R は座標反転のみ、pose は `forward_geo(rot_params=...)`）。 |
+| `preprocess/smirk_demo.py` | `use_lbs_pose` デフォルトを `True` に変更。legacy 挙動を見たいときは `use_ext_pose=True` に opt-in。 |
+| `preprocess/cli.py` | `--demo-lbs-pose` は **deprecated no-op**（既に LBS 既定なので何もしない）。legacy 再現用に `--demo-ext-pose` を新設。 |
+| `utils/flame_converter.py` | `convert()` の出力 `flame` dict に `pose` を追加。`convert_flame_params_only()` の codedict に `head_pose` を追加（DECA/EMOCA/SMIRK/SPARK 共通）。 |
 
-1. **`preprocess/smirk_convert.py::to_flashavatar_frame`**
-   - `flame_dict` に `pose`（`pose_params` を rot6d に変換）を追加
-   - `_build_R` を `GL_TO_CV` のみ返す形に変更（pose を畳み込まない）
-2. **`src/deform_model.py::decode`**
-   - `flame_model.forward_geo(..., rot_params=codedict['pose'])` を
-     渡すよう追加
-3. **`scene/__init__.py`**
-   - `flame_params` から `pose` を読み出し、`codedict` に含めて
-     `deform_model` に渡す
-4. **`preprocess/smirk_demo.py`, `preprocess/smirk_verify.py`**
-   - デフォルトを LBS convention に変更、または `--demo-lbs-pose` を
-     デフォルト ON にする
+### 後方互換性
 
-### 互換性
+**新規 `.frame`（本 PR 以降に生成）** — `flame.pose` を持ち、`opencv.R`
+は純粋な座標反転。`scene` はこの両方を尊重して LBS で pose を適用します。
 
-既存の `.frame` ファイルは `flame_dict` に `pose` を持たないため、
-この変更は **既存学習済みモデル・既存 `.frame` 出力との後方互換性を
-破壊**します。推奨移行戦略は「全 `.frame` を再生成 + FlashAvatar
-再学習」。convention 混在を避けるため。
+**旧 `.frame`（本 PR より前に生成。metrical-tracker 由来を含む）** —
+`flame.pose` を持たない。`scene` は単位 rot6d をフォールバックとして
+`head_pose` に入れ、結果として LBS は無回転メッシュを出力、`opencv.R`
+（そこに pose が畳み込まれている）が rasterizer 側で頭を回す形になる。
+**従来と同じ出力**が得られるので、**既存学習済みモデルは再学習なしで
+そのまま動作**します。
+
+### 移行戦略（新規学習時）
+
+既存データで新しく学習する場合は、以下のどちらかです：
+
+1. **`.frame` を再生成して再学習**（推奨） — `--bbox-mode offline` など
+   の他の新機能と同じタイミングで LBS 版の `.frame` に更新し、そこから
+   再学習。口の開閉・瞬き連動の揺れ・左右振り時の奥行きずれが消えます。
+2. **旧 `.frame` のまま既存モデルを使い続ける** — 後方互換パスが効くので
+   何もしなくても壊れません（ただし上記の揺れは残ります）。
+
+`.frame` を混ぜるのは避けてください（`flame.pose` の有無はフレーム単位
+で判定されるため実害はありませんが、学習データと test データで convention
+が食い違うと混乱の元です）。
 
 ### 残りうる純 encoder 起因の揺れ
 
-`--demo-lbs-pose` + `--demo-lock-bbox` の組み合わせでも観測される
-以下は SMIRK encoder 自体の性質で、幾何学修正では解消しません:
+上記の LBS 化で「原点中心回転」由来の揺れは消えました。`--demo-lock-bbox`
+や `--demo-smooth-bbox` と併用しても観測される以下は、SMIRK encoder 自体の
+性質による残留揺れです：
 
 - 口の開閉時に bbox 縦幅が変動 → `s, cam` がわずかに揺れる
 - メッシュがわずかに膨張/収縮して見える
 
-この残留揺れに対しては、上記 LPF（`--lpf-cutoff`）か、または
-SMIRK 側での「顎・口の動きに不感な bbox 定義」の導入で対処することが
-想定されます（後者は SMIRK 本体の改修が必要）。
+この残留揺れには `--bbox-mode {online, offline}`（bbox 安定化・本リポの
+前段修正）または `--lpf-cutoff`（FLAME パラメータ平滑化）が効きます。
+実際、`--bbox-mode offline --lpf-cutoff 2.0` の 3 層適用で教師データ品質が
+大きく上がる構成です。
 
 ## 既存のインストール／パイプラインとの関係
 

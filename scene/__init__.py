@@ -14,6 +14,17 @@ from utils.general_utils import PILtoTensor
 from utils.graphics_utils import focal2fov
 
 
+# Identity rotation in pytorch3d row-major 6D convention (first two rows of
+# the 3x3 identity flattened, so `rotation_6d_to_matrix` reconstructs I_3).
+# Scene_mica uses this as the fallback `head_pose` when a `.frame` file was
+# written before `flame.pose` was added to the schema; the FLAME LBS then
+# leaves the mesh at its canonical orientation and the rasterizer's
+# world-to-view rotation (which legacy writers folded the head pose into)
+# still drives the render — preserving byte-compatible output for old
+# trained checkpoints.
+_IDENTITY_ROT6D = torch.tensor([[1., 0., 0., 0., 1., 0.]], dtype=torch.float32)
+
+
 class Scene_mica:
     def __init__(self, datadir, mica_datadir, train_type, white_background, device,
                  use_keep_list=True,
@@ -144,6 +155,20 @@ class Scene_mica:
             eyes_pose = torch.as_tensor(flame_params['eyes'])
             eyelids = torch.as_tensor(flame_params['eyelids'])
             jaw_pose = torch.as_tensor(flame_params['jaw'])
+            # Global head rotation applied via FLAME LBS (root-joint rotation).
+            # New .frame writers (smirk_convert, flame_converter) populate
+            # `flame.pose`; legacy .frame files from metrical-tracker or the
+            # pre-fix SMIRK path lack the key and instead fold the head pose
+            # into opencv.R. We fall back to identity rot6d in that case so
+            # the rasterizer's world-to-view rotation (which still carries
+            # the pose in legacy files) continues to drive the rendered
+            # output unchanged — old trained checkpoints keep reproducing
+            # their original result. See docs/smirk.md ("pose rotation
+            # center") for the analysis.
+            if 'pose' in flame_params:
+                head_pose = torch.as_tensor(flame_params['pose'])
+            else:
+                head_pose = _IDENTITY_ROT6D.clone()
 
             oepncv = payload['opencv']
             w2cR = oepncv['R'][0]
@@ -200,6 +225,7 @@ class Scene_mica:
                                 FoVx=FovX, FoVy=FovY,
                                 image=gt_image, head_mask=head_mask, mouth_mask=mouth_mask,
                                 exp_param=exp_param, eyes_pose=eyes_pose, eyelids=eyelids, jaw_pose=jaw_pose,
+                                head_pose=head_pose,
                                 image_name=image_name_mica, uid=frame_id, data_device=device)
             self.cameras.append(camera_indiv)
 

@@ -80,7 +80,8 @@ def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
         demo_fps: float = 25.0,
         demo_lock_bbox: bool = False,
         demo_smooth_bbox: int = 0,
-        demo_lbs_pose: bool = False,
+        demo_lbs_pose: bool = True,
+        demo_ext_pose: bool = False,
         lpf_cfg=None) -> int:
     """Drive the whole tracker: detect+crop+encode+convert+write.
 
@@ -158,7 +159,8 @@ def run(cfg: SmirkConfig, raw_imgs: Path, ckpt_out: Path,
         from preprocess.smirk_demo import dump_demo
         dump_demo(payloads, shape, img_size, cfg, demo_path, fps=demo_fps,
                   lock_bbox=demo_lock_bbox, smooth_bbox=demo_smooth_bbox,
-                  use_lbs_pose=demo_lbs_pose)
+                  use_lbs_pose=demo_lbs_pose,
+                  use_ext_pose=demo_ext_pose)
 
     return n_written
 

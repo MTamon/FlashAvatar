@@ -32,7 +32,8 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
               fps: float = 25.0, draw_bbox: bool = True,
               draw_landmarks: bool = True, draw_mesh: bool = True,
               mesh_stride: int = 8, lock_bbox: bool = False,
-              smooth_bbox: int = 0, use_lbs_pose: bool = False) -> None:
+              smooth_bbox: int = 0, use_lbs_pose: bool = True,
+              use_ext_pose: bool = False) -> None:
     """Write an overlay mp4 + stats CSV alongside it.
 
     Args:
@@ -58,14 +59,23 @@ def dump_demo(payloads, shape, img_size, cfg, demo_path: Path,
                    this as a middle ground between lock-bbox and no-op.
                    Causal/non-causal doesn't matter for this diagnostic — we
                    have the whole sequence in memory.
-        use_lbs_pose: if True, apply `pose_params` inside FLAME's LBS
-                   kinematic tree (rotation around the root joint) and set
-                   the external R to the pure GL->CV coord flip. This
-                   matches SMIRK's own demo rendering and isolates the
-                   true per-frame encoder jitter from the "origin rotation"
-                   amplification FlashAvatar's pipeline introduces. Does
-                   NOT affect the `.frame` output.
+        use_lbs_pose: if True (the DEFAULT since the LBS fix), apply
+                   `pose_params` inside FLAME's LBS kinematic tree
+                   (root-joint rotation) and set the external R to the
+                   pure OpenGL->OpenCV coord flip. Matches the `.frame`
+                   output `to_flashavatar_frame` writes and the render
+                   convention FlashAvatar's scene / deform_model now use.
+        use_ext_pose: opt-in diagnostic — force the pre-fix convention
+                   (pose folded into external R, FLAME canonical). Only
+                   useful for A/B comparisons against old checkpoints /
+                   legacy `.frame` files; overrides `use_lbs_pose` when
+                   set. Does NOT affect the `.frame` output.
     """
+    # `use_ext_pose=True` takes precedence — it's an opt-in diagnostic for
+    # reproducing the old buggy rendering convention. Otherwise honour the
+    # new default (LBS).
+    if use_ext_pose:
+        use_lbs_pose = False
     demo_path = Path(demo_path)
     demo_path.parent.mkdir(parents=True, exist_ok=True)
     stats_path = demo_path.with_name(demo_path.stem + "_stats.csv")
