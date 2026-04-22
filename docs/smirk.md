@@ -529,6 +529,128 @@ python scripts/preprocess.py smirk --idname <idname> \
     --demo-video demo_lbs.mp4 --demo-fps 30 --demo-lbs-pose
 ```
 
+## BBox 安定化（`--bbox-mode`）
+
+SMIRK `release/cuda128` (PR #7) で **crop 用 bbox の安定化**が追加されました。
+従来の `crop_face` は MediaPipe ランドマーク **全点** の min/max から
+bbox を導出していたため、口の開閉・瞬き・検出ノイズがそのまま bbox の
+`size` に漏れ、SMIRK が予測する正射影カメラが振動し、再投影メッシュが
+耳・頭頂付近で「呼吸」するように見えていました。
+
+PR #7 は 2 段構成で対策します。
+
+1. **安定ランドマーク部分集合**：目尻・鼻根・こめかみなど、
+   **発話・瞬きで動かない** 15 点だけで bbox を導出。口が開いても
+   bbox `size` は広がらない。
+2. **時間方向の平滑化**：`size` 系列（必要なら `center` も）に LPF を掛ける。
+   オンライン／オフラインで**使うフィルタが違う**。
+
+FlashAvatar 側では `--bbox-mode` フラグから 3 つのモードを選べます。
+
+| モード | 挙動 | 用途 | パス数 | `.frame` への影響 |
+|---|---|---|---|---|
+| `legacy`（**既定**） | 全ランドマーク min/max・平滑化なし（PR#7 前の挙動） | 既存 `.frame` とのビット互換維持 | 1 | なし（既存と一致） |
+| `online` | 安定部分集合 + **One-Euro フィルタ**（CHI 2012）を `size` に逐次適用。O(1) 状態でリアルタイム／Webcam 相当 | 消費側が「オンライン平滑化された」入力を期待するとき | 1 | あり |
+| `offline` | 安定部分集合 + **ゼロ位相 FIR 低域通過**を全 `size` 系列に事前一括適用。最初に全フレームを走査して `size/center` を集めてからフィルタ→エンコード | 教師データ作成・最高品質。短いクリップ不可 | 2 | あり |
+
+> **重要 — online と offline は意味が違います。**
+>
+> - **online**：One-Euro は **逐次（causal）** フィルタで、過去サンプルだけから
+>   現在の平滑値を計算します。ウォームアップで小さな遅延があり、強い
+>   平滑化のもとでも位相遅れは数フレームで収束します。**SMIRK 公式デモの
+>   新しい既定**（`--bbox_mode online`）と同じ実装です。
+> - **offline**：ゼロ位相 FIR（`scipy.signal.firwin` + 対称畳み込み + エッジ
+>   パディング）で、**前向き／後向き両方向**の信号を参照します。位相遅れ
+>   ゼロですが、シーケンスが短いと（FIR タップ長の数倍必要）エラー。
+>   **先頭・末尾数十フレーム**はエッジ効果を受けます。
+
+### 使い方
+
+online（リアルタイム相当、fps 必須）：
+
+```bash
+python scripts/preprocess.py smirk --idname <idname> \
+    --bbox-mode online --bbox-fps 30 \
+    --demo-video demo_online.mp4 --demo-fps 30
+```
+
+offline（最高品質、fps 必須）：
+
+```bash
+python scripts/preprocess.py smirk --idname <idname> \
+    --bbox-mode offline --bbox-fps 30 \
+    --offline-size-cutoff 2.5 \
+    --demo-video demo_offline.mp4 --demo-fps 30
+```
+
+既存の挙動（`--bbox-mode` 指定なし＝`legacy`）：
+
+```bash
+# これまでどおり。bbox は全ランドマーク min/max で導出される。
+python scripts/preprocess.py smirk --idname <idname>
+```
+
+### フラグ
+
+| フラグ | 既定 | 意味 |
+|---|---|---|
+| `--bbox-mode` | `legacy` | `legacy` / `online` / `offline`。既存 `.frame` とのビット互換維持が必要なら `legacy`。 |
+| `--bbox-all-landmarks` | off | 安定部分集合を使わず全ランドマーク min/max に戻す。安定部分集合が顔以外に落ちる特殊ケースの救済弁。通常は既定のまま。 |
+| `--bbox-fps HZ` | なし | 映像 FPS。`online` / `offline` で**必須**。cutoff の Nyquist 正規化に使う。 |
+| `--online-size-min-cutoff HZ` | 1.0 | One-Euro の静止時カットオフ。小さいほど静止時に強く平滑化。 |
+| `--online-size-beta` | 0.02 | One-Euro の速度感度。大きいほど速い動きで素早く追従。 |
+| `--online-center-cutoff HZ` | なし | `center` も One-Euro 平滑化したいとき指定。通常は未指定のまま（頭部並進は正直に追従させる）。 |
+| `--online-center-beta` | 0.02 | `center` 用の One-Euro beta（`--online-center-cutoff` 指定時のみ使用）。 |
+| `--offline-size-cutoff HZ` | 2.5 | `size` 用 FIR の cutoff。安定部分集合を使うと `size` はカメラ距離だけ持つ信号になるので 2〜3 Hz で安全。 |
+| `--offline-size-taps` | 61 | FIR タップ数（奇数に切り上げ）。シーケンス長より小さい必要あり。30 fps で ~1 s の群遅延（エッジ補正で相殺）。 |
+| `--offline-center-cutoff HZ` | なし | `center` 用 FIR の cutoff。未指定で `center` は生値のまま。 |
+
+### 設計指針
+
+- **既定は `legacy`**：`.frame` のビット互換を崩さない設計で、PR#7 を取り込む
+  ためだけに既存の学習済みモデルを再学習させる必要はない。
+- **新規データで高品質が欲しい**なら `offline`。シーケンスが十分長い
+  （目安 FIR タップの 3 倍以上 = 数百フレーム）前提。口の開閉・瞬きの影響が
+  メッシュ揺れに現れる動画でまず試す。
+- **真のリアルタイム用途**または online 前提の消費側に合わせたい場合は
+  `online`。`.frame` は causal 平滑の結果を格納する。
+- **`--bbox-fps` は正確に**。フレーム抽出時の `fps=30` 指定や原動画の
+  FPS と一致させる。誤差があると cutoff が意図と違う Hz になる。
+- **FLAME パラメータへの LPF (`--lpf-cutoff`) との違い**：
+  - **`--bbox-mode` は encoder の入力段**を安定化する。`cam` / `t` / `bbox_size`
+    の振動源を**上流で**断つ。
+  - **`--lpf-cutoff` は encoder の出力**（FLAME パラメータ系列）を平滑化する。
+    bbox 安定化で残った residual jitter（特に encoder そのものの出力揺れ）を
+    下流で抑える。
+  - 併用可。Listening Head Gen の教師データ作成では
+    `--bbox-mode offline --lpf-cutoff ...` を重ねて掛けるのが推奨。
+
+### 注意点
+
+- **offline と短いクリップ**：`fir_lowpass_offline` はシーケンス長がタップ数
+  より短いと**そのまま素通し（フィルタ無効）**にフォールバックします。
+  暗黙に効かなくなるので、`--demo-video` の stats で平滑化が効いているか
+  一度は目視確認してください。
+- **online の冒頭数フレーム**は One-Euro の初期化中でほぼ未平滑です。学習
+  データに使うときは冒頭 ~30 フレームを捨てると安全。
+- **`--bbox-mode offline` は 2-pass** なので MediaPipe 検出コストが実質 1 回
+  分増えます（encoder は 1 回しか走らせない。ランドマークはキャッシュされる）。
+  encoder が律速でないクリップでは所要時間が倍近くになる点に注意。
+- **MediaPipe VIDEO モードの時系列状態**：offline の pass-2 では
+  MediaPipe を**再実行しません**（pass-1 のランドマークを使い回し）。
+  VIDEO トラッキング状態が二重に進行するのを避け、決定性を保つためです。
+- **`eye-mode blendshapes`** や FLAME `--lpf-*` との併用は自由。どちらも
+  本機能と直交します。
+
+### demo 用フラグとの関係
+
+既存の `--demo-lock-bbox` / `--demo-smooth-bbox` は **demo 描画専用**で、
+`.frame` には影響しませんでした。本 `--bbox-mode` は逆で、demo 描画にも
+`.frame` にも影響します（encoder 入力そのものを変えるため）。
+
+- jitter 源の診断が目的 → `--demo-lock-bbox` / `--demo-smooth-bbox` を使う。
+- 実際に学習・出力を改善したい → `--bbox-mode {online, offline}` を使う。
+
 ## 時間方向 LPF（`--lpf-cutoff`）
 
 Listening Head Generation の学習では 1 次・2 次差分（速度・加速度）

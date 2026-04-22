@@ -7,13 +7,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Sequence
 
 import numpy as np
 import torch
 
 # Imported lazily from the SMIRK repo root (added to sys.path by
 # preprocess.smirk_tracker._ensure_on_pythonpath).
+
+
+@dataclass
+class _Prepared:
+    """Per-frame encoder input assembled by the orchestrator.
+
+    Populated either directly (legacy / online bbox) or from a precomputed
+    smoothed tform list (offline bbox). Kept internal to the runtime layer.
+    """
+    crop: np.ndarray            # uint8 (224, 224, 3) RGB
+    tform_matrix: np.ndarray    # (3, 3) full-frame px -> crop px
+    bbox_center: np.ndarray     # (2,) full-frame center of the crop bbox
+    bbox_size: float            # full-frame side length of the crop bbox
+    landmarks: np.ndarray | None
+    blendshapes: dict
+    detected: bool
 
 
 @dataclass
@@ -160,49 +176,121 @@ class SmirkRunner:
     # ---- public -------------------------------------------------------
 
     def encode_batch(self, imgs_rgb: List[np.ndarray]) -> list[FrameResult]:
-        crops = []
-        tforms = []
-        centers = []
-        sizes = []
-        detected_flags = []
-        blendshape_dicts: list[dict] = []
-        landmarks_list: list[np.ndarray] = []
-        for img in imgs_rgb:
-            lm, bs = self._detect(img)
-            if lm is None:
-                # Re-use last good landmarks so the crop stays roughly stable;
-                # mark as not-detected so a caller can filter if desired.
-                lm = self._prev_landmarks
-                bs = self._prev_blendshapes
-                detected = False
-            else:
-                detected = True
-                self._prev_landmarks = lm
-                self._prev_blendshapes = bs or {}
-            if lm is None:
-                raise RuntimeError(
-                    "No face detected in the very first frame. "
-                    "SMIRK needs a valid MediaPipe detection at least once "
-                    "to initialize the crop.")
-            crop, tform, center, size = self._crop_224(img, lm)
-            crops.append(crop)
-            tforms.append(tform)
-            centers.append(center)
-            sizes.append(size)
-            detected_flags.append(detected)
-            blendshape_dicts.append(bs or {})
-            landmarks_list.append(lm.astype(np.float32))
+        """Legacy path: detect + legacy crop + encode for each image.
 
-        batch = np.stack(crops, axis=0).astype(np.float32) / 255.0
-        batch_t = torch.from_numpy(batch).permute(0, 3, 1, 2).to(self.device)
+        Bbox is derived from the min/max of every MediaPipe landmark, which
+        is what we shipped before bbox stabilization landed in SMIRK
+        (release/cuda128). Kept as the default for backward-compatibility
+        with existing `.frame` outputs. For stabilized bbox, callers should
+        drive the runner via `detect_with_fallback` + `encode_prepared`
+        (see `preprocess.smirk_tracker.run` for the orchestration).
+        """
+        prepared: list[_Prepared] = []
+        for img in imgs_rgb:
+            lm, bs, detected = self.detect_with_fallback(img)
+            crop, tform, center, size = self._crop_224(img, lm)
+            prepared.append(_Prepared(
+                crop=crop, tform_matrix=tform,
+                bbox_center=center, bbox_size=size,
+                landmarks=lm, blendshapes=bs, detected=detected,
+            ))
+        return self.encode_prepared(prepared)
+
+    def detect_with_fallback(
+        self, img_rgb: np.ndarray,
+    ) -> tuple[np.ndarray, dict, bool]:
+        """Run MediaPipe on one frame; reuse the previous landmarks on miss.
+
+        Returns ``(landmarks (N, 2), blendshapes, detected)``. Exists as a
+        public method so the tracker orchestrator can detect landmarks in an
+        offline pre-pass (before cropping) without reimplementing the
+        first-frame / fallback semantics.
+
+        Raises `RuntimeError` when the very first frame has no detection —
+        we need at least one landmark set to seed the crop.
+        """
+        lm, bs = self._detect(img_rgb)
+        if lm is None:
+            lm = self._prev_landmarks
+            bs = self._prev_blendshapes
+            detected = False
+        else:
+            detected = True
+            self._prev_landmarks = lm
+            self._prev_blendshapes = bs or {}
+        if lm is None:
+            raise RuntimeError(
+                "No face detected in the very first frame. "
+                "SMIRK needs a valid MediaPipe detection at least once "
+                "to initialize the crop.")
+        return lm, bs or {}, detected
+
+    def crop_224(self, img_rgb: np.ndarray, landmarks: np.ndarray):
+        """Public wrapper for `_crop_224` (legacy all-landmarks bbox).
+
+        Returns `(crop_uint8, tform_matrix_3x3, bbox_center_xy, bbox_size)`.
+        """
+        return self._crop_224(img_rgb, landmarks)
+
+    def crop_224_with_tform(self, img_rgb: np.ndarray, tform) -> np.ndarray:
+        """Warp `img_rgb` to a 224x224 crop given a precomputed skimage
+        similarity transform.
+
+        Online / offline bbox stabilization builds the similarity tform
+        externally (via SMIRK's `build_similarity_tform`) and feeds the
+        resulting crop to the encoder; this helper centralises the
+        `skimage.transform.warp` invocation so the bilinear order and the
+        `preserve_range` flag match what `_crop_224` uses in legacy mode.
+        """
+        from skimage.transform import warp
+
+        size = self.cfg.crop_size
+        crop = warp(
+            img_rgb, tform.inverse,
+            output_shape=(size, size), preserve_range=True, order=1,
+        ).astype(np.uint8)
+        return crop
+
+    def encode_prepared(
+        self, prepared: Sequence,
+    ) -> list[FrameResult]:
+        """Run the SMIRK encoder on a batch of pre-cropped inputs.
+
+        Takes a sequence of record objects (either `_Prepared` from this
+        module or any object with the same attributes — a `SimpleNamespace`
+        works) and returns `FrameResult`s ready for the downstream `.frame`
+        writer.
+
+        The accepted duck-type is:
+
+            record.crop          : np.uint8 (224, 224, 3) RGB
+            record.tform_matrix  : np.ndarray (3, 3)
+            record.bbox_center   : np.ndarray (2,)
+            record.bbox_size     : float
+            record.landmarks     : np.ndarray (N, 2) or None
+            record.blendshapes   : dict
+            record.detected      : bool
+
+        Duck-typing matters here because this module is loaded twice at
+        runtime (once as the top-level `smirk_runtime` module via
+        `_ensure_on_pythonpath` — the name `SmirkRunner` sees — and once
+        as `preprocess._smirk.smirk_runtime` via the package path).
+        Importing `_Prepared` across those two paths would yield two
+        distinct class objects and break `isinstance` checks; accepting
+        any attribute-compatible record sidesteps the hazard.
+        """
+        if not prepared:
+            return []
+        batch_np = np.stack([p.crop for p in prepared], axis=0).astype(np.float32)
+        batch_np /= 255.0
+        batch_t = torch.from_numpy(batch_np).permute(0, 3, 1, 2).to(self.device)
         with torch.no_grad():
             out = self.encoder(batch_t)
-        # SMIRK encoder outputs a dict with 'shape_params' etc; gather.
         out_np = {k: v.detach().cpu().numpy() for k, v in out.items()
                   if isinstance(v, torch.Tensor)}
 
         results: list[FrameResult] = []
-        for i in range(len(imgs_rgb)):
+        for i, p in enumerate(prepared):
             results.append(FrameResult(
                 shape_params=out_np["shape_params"][i],
                 expression_params=out_np["expression_params"][i],
@@ -210,12 +298,13 @@ class SmirkRunner:
                 jaw_params=out_np["jaw_params"][i],
                 eyelid_params=out_np["eyelid_params"][i],
                 cam=out_np["cam"][i],
-                tform_matrix=tforms[i],
-                bbox_center=centers[i],
-                bbox_size=sizes[i],
-                detected=detected_flags[i],
-                landmarks=landmarks_list[i],
-                blendshapes=blendshape_dicts[i],
+                tform_matrix=np.asarray(p.tform_matrix, dtype=np.float64),
+                bbox_center=np.asarray(p.bbox_center, dtype=np.float64),
+                bbox_size=float(p.bbox_size),
+                detected=bool(p.detected),
+                landmarks=(p.landmarks.astype(np.float32)
+                           if p.landmarks is not None else None),
+                blendshapes=p.blendshapes or {},
             ))
         return results
 
