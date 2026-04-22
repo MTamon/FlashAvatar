@@ -30,6 +30,10 @@ class FrameResult:
     bbox_center: np.ndarray       # (2,) full-frame center of the crop bbox
     bbox_size: float              # full-frame side length of the crop bbox
     detected: bool = True         # False => we re-used the previous crop
+    # MediaPipe landmarks in full-frame pixels (N, 2). Kept around so the
+    # demo/verify tools can draw them without re-running MediaPipe. May be
+    # the previous frame's landmarks when `detected` is False.
+    landmarks: np.ndarray | None = None
     # MediaPipe Face Landmarker blendshape scores (dict[str, float]) used by
     # `preprocess.smirk_convert.eye_pose_6d_from_blendshapes` to synthesize
     # eye_pose. None when the `.task` file isn't available and we fell back
@@ -47,6 +51,11 @@ class SmirkRunner:
         self._load_mediapipe()
         self._prev_landmarks: np.ndarray | None = None
         self._prev_blendshapes: dict = {}
+        # Monotonically-increasing timestamp (ms) for MediaPipe VIDEO mode.
+        # Tasks API's FaceLandmarker rejects non-increasing timestamps with
+        # a RuntimeError, so we increment here rather than relying on a
+        # caller-supplied frame index.
+        self._mp_timestamp_ms: int = 0
 
     def _load_encoder(self) -> None:
         # SMIRK (MTamon/smirk@release/cuda128) ships as a proper `smirk`
@@ -96,13 +105,22 @@ class SmirkRunner:
                     model_asset_path=str(task_path),
                     delegate=mp_python.BaseOptions.Delegate.CPU,
                 )
+                # VIDEO mode enables MediaPipe's built-in tracking: after the
+                # first successful detection, subsequent `detect_for_video`
+                # calls seed the landmark regressor with the previous frame's
+                # result, which reduces per-frame landmark jitter
+                # substantially. Stateless IMAGE mode (the default) runs a
+                # fresh detection on every frame and amplifies jitter that
+                # then leaks into the SMIRK crop tform.
                 options = mp_vision.FaceLandmarkerOptions(
                     base_options=base,
+                    running_mode=mp_vision.RunningMode.VIDEO,
                     output_face_blendshapes=True,
                     output_facial_transformation_matrixes=False,
                     num_faces=1,
                     min_face_detection_confidence=0.1,
                     min_face_presence_confidence=0.1,
+                    min_tracking_confidence=0.1,
                 )
                 self._landmarker = mp_vision.FaceLandmarker.create_from_options(options)
                 self._mp_image_cls = mp.Image
@@ -148,6 +166,7 @@ class SmirkRunner:
         sizes = []
         detected_flags = []
         blendshape_dicts: list[dict] = []
+        landmarks_list: list[np.ndarray] = []
         for img in imgs_rgb:
             lm, bs = self._detect(img)
             if lm is None:
@@ -172,6 +191,7 @@ class SmirkRunner:
             sizes.append(size)
             detected_flags.append(detected)
             blendshape_dicts.append(bs or {})
+            landmarks_list.append(lm.astype(np.float32))
 
         batch = np.stack(crops, axis=0).astype(np.float32) / 255.0
         batch_t = torch.from_numpy(batch).permute(0, 3, 1, 2).to(self.device)
@@ -194,6 +214,7 @@ class SmirkRunner:
                 bbox_center=centers[i],
                 bbox_size=sizes[i],
                 detected=detected_flags[i],
+                landmarks=landmarks_list[i],
                 blendshapes=blendshape_dicts[i],
             ))
         return results
@@ -211,8 +232,16 @@ class SmirkRunner:
             mp_image = self._mp_image_cls(
                 image_format=self._mp_image_format, data=img_rgb,
             )
+            # VIDEO mode requires strictly-monotonic timestamps. The absolute
+            # value doesn't matter (frames don't have to align to a real clock);
+            # we just need each call > the previous. 33 ms/step corresponds to
+            # ~30 fps but MediaPipe doesn't use the delta for anything other
+            # than ordering, so we don't need to know the true FPS here.
+            self._mp_timestamp_ms += 33
             try:
-                res = self._landmarker.detect(mp_image)
+                res = self._landmarker.detect_for_video(
+                    mp_image, self._mp_timestamp_ms,
+                )
             except Exception:
                 return None, None
             if not res.face_landmarks:

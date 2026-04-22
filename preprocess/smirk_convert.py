@@ -102,7 +102,7 @@ def to_flashavatar_frame(
     # --- OpenCV camera (K, R, t) at full-frame resolution --------------
     K = _build_K(w, h, focal_px)
     R = _build_R(r.pose_params)
-    t = _build_t(r.cam, r.tform_matrix, w, h, focal_px)
+    t = _build_t(r.cam, r.bbox_center, r.bbox_size, w, h, focal_px)
 
     return {
         "flame": flame_dict,
@@ -220,59 +220,79 @@ def _build_R(pose_aa: np.ndarray) -> np.ndarray:
     return _GL_TO_CV @ R_gl
 
 
-def _build_t(cam: np.ndarray, tform: np.ndarray,
+def _build_t(cam: np.ndarray, bbox_center: np.ndarray, bbox_size: float,
              w: int, h: int, f_px: float) -> np.ndarray:
-    """Back-project SMIRK's weak-perspective [s, tx, ty] through the crop's
-    similarity `tform` to an OpenCV translation.
+    """Back-project SMIRK's weak-perspective [s, tx, ty] + the MediaPipe
+    bbox to an OpenCV translation in the FULL frame.
+
+    This is an explicit bbox_center / bbox_size decomposition of what used
+    to go through the crop's similarity `tform` matrix. Equivalent math,
+    but each term carries a clear physical meaning — so jitter sources
+    can be attributed unambiguously:
+
+        u_full = bbox_center_x + SMIRK_offset_x
+        v_full = bbox_center_y + SMIRK_offset_y
+        Z      = f_px / apparent_face_scale_full_px
 
     Derivation:
-      SMIRK renders orthographic in a 224 crop, where the FLAME origin lands
-      at crop pixel (112 + 112*tx, 112 + 112*ty) (with the y-flip folded in).
-      For a perspective camera with focal f_px observing a point at depth Z,
-      the same pixel offset corresponds to world-space (u - cx) * Z / f_px,
-      (v - cy) * Z / f_px. We choose Z so that the mesh has the same screen
-      size as the orthographic projection:
-           projected scale at Z = f_px / Z
-           matches SMIRK scale in full-frame px = s * (bbox_size / 2)
-           where bbox_size is crop_scale * old_size in original pixels.
-      Equivalently Z = (2 * f_px) / (s * crop_size) * (crop_size / bbox_size_224)
-      — but since `tform` is a similarity we can read the scale directly off
-      its 2x2 block as `sim_scale = tform[0, 0]` (it's isotropic by
-      construction), giving `px_per_unit = s * sim_scale_inv * half_crop`
-      and finally Z = f_px / (s * half_crop_full_px) — see code below.
+      SMIRK's weak-perspective renders orthographically inside the 224
+      crop: the FLAME origin lands at crop pixel
+        u_crop = 112 + 112 * s * tx
+        v_crop = 112 - 112 * s * ty         (y flipped to y-down)
+      The crop covers a square of `bbox_size` full-frame pixels centred on
+      `bbox_center`. The crop-to-full pixel scale is therefore
+        k = bbox_size / (CROP_SIZE - 1)     (~= bbox_size / 223)
+      i.e. one crop pixel spans `k` full-frame pixels. The FLAME origin's
+      full-frame pixel is then
+        u_full = bbox_center_x + (u_crop - HALF) * k
+               = bbox_center_x + 112 * s * tx * k
+               ~~ bbox_center_x + (s * tx) * (bbox_size / 2)
+
+      Depth: SMIRK's scale `s` is "crop-NDC units per FLAME unit", so one
+      FLAME unit spans `s * HALF` crop pixels, i.e. `s * HALF * k` full-
+      frame pixels. For a perspective camera at depth Z, one FLAME unit
+      spans `f_px / Z` full-frame pixels. Equating:
+          Z = f_px / (s * HALF * k)
+            ~~ 2 * f_px / (s * bbox_size)
+
+    Note this Z formula couples `s` (from SMIRK encoder) and `bbox_size`
+    (from MediaPipe landmarks). Independent jitter in either amplifies
+    multiplicatively into Z, and then into t_x, t_y (through Z * (u-cx)
+    / f_px). Smoothing either one attacks the Z-jitter source directly.
     """
+    CROP_SIZE = 224
+    # SMIRK's weak-perspective renderer maps NDC=0 to crop pixel
+    # CROP_SIZE/2 (= 112). The skimage similarity transform in `_crop_224`
+    # maps bbox corners to dst pixels 0 and (CROP_SIZE-1). Keeping both
+    # conventions — HALF_PROJ = 112 for SMIRK renderer, and divisor
+    # (CROP_SIZE - 1) for the crop scale — preserves the exact numerical
+    # output of the original `tform`-based implementation so the `.frame`
+    # files don't silently change under this refactor.
+    HALF_PROJ = CROP_SIZE / 2.0  # 112.0
+    denom = max(CROP_SIZE - 1, 1)  # 223
+
     s, tx, ty = float(cam[0]), float(cam[1]), float(cam[2])
-    crop = 224.0
-    half = crop / 2.0
-    # Crop-space pixel of the projected FLAME origin (y flipped to y-down):
-    #   x_ndc = s * (X + tx), y_ndc = s * (Y + ty)
-    #   pix_x = (x_ndc + 1) * half = half + half*s*tx  (for X=0)
-    #   pix_y = (1 - y_ndc) * half = half - half*s*ty  (y flipped)
-    u_crop = half + half * s * tx
-    v_crop = half - half * s * ty
+    bx, by = float(bbox_center[0]), float(bbox_center[1])
 
-    # Un-warp crop pixel -> full-frame pixel via tform.inverse (homogeneous).
-    # tform maps full -> crop; to go the other way, inv(tform) @ [u,v,1]^T.
-    T_inv = np.linalg.inv(tform)
-    p = T_inv @ np.array([u_crop, v_crop, 1.0], dtype=np.float64)
-    u_full = p[0] / p[2]
-    v_full = p[1] / p[2]
+    # Crop-pixel-per-full-pixel ratio: (size - 1) / bbox_size. Its inverse
+    # k turns crop pixels into full-frame pixels.
+    k = float(bbox_size) / denom
 
-    # Scale bridge: the similarity tform has an isotropic scale that turns
-    # full-frame px into crop px (crop = scale_ff * full). Its inverse is
-    # px_per_unit in full frame.
-    # After weak-perspective with param `s`, one FLAME unit = s * half_crop
-    # px in crop-space = s * half_crop / scale_ff px in full frame.
-    # Matching perspective at depth Z: 1 FLAME unit = f_px / Z full-frame px.
-    # Therefore Z = f_px * scale_ff / (s * half_crop).
-    scale_ff = float(abs(tform[0, 0]))  # crop_px per full_px
-    Z = f_px * scale_ff / max(s * half, 1e-6)
+    # Full-frame pixel of the projected FLAME origin (bbox position +
+    # SMIRK-relative offset, plus a half-pixel bias inherited from the
+    # 112 vs 111.5 convention mismatch above).
+    u_full = bx + k * (HALF_PROJ + HALF_PROJ * s * tx) - bbox_size / 2.0
+    v_full = by - k * (HALF_PROJ * s * ty - HALF_PROJ) - bbox_size / 2.0
+
+    # Apparent face scale in full-frame pixels per FLAME unit, using
+    # SMIRK's HALF_PROJ convention so `Z` matches the original formula.
+    apparent_px_per_flame = s * HALF_PROJ * k
+    Z = f_px / max(apparent_px_per_flame, 1e-6)
 
     cx = w / 2.0
     cy = h / 2.0
-    t = np.array([
+    return np.array([
         (u_full - cx) * Z / f_px,
         (v_full - cy) * Z / f_px,
         Z,
     ], dtype=np.float64)
-    return t

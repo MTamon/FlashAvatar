@@ -176,6 +176,73 @@ def build_argparser() -> argparse.ArgumentParser:
     sm.add_argument("--verify-dir", type=Path, default=None,
                     help="If set, dump landmark reprojection stats + overlay "
                          "JPEGs to this directory for sanity check.")
+    sm.add_argument("--demo-video", type=Path, default=None,
+                    help="If set, render an overlay mp4 at this path with "
+                         "bbox + MediaPipe landmarks + FLAME mesh reprojection "
+                         "drawn on the source frames. Writes a sibling "
+                         "`<stem>_stats.csv` with per-frame bbox/translation "
+                         "first-differences so jitter is visible as a time "
+                         "series. Useful to diagnose whether jitter originates "
+                         "at the landmark / crop / encoder / camera layer.")
+    sm.add_argument("--demo-fps", type=float, default=25.0,
+                    help="Playback fps for --demo-video (default 25). The "
+                         "SMIRK pipeline is frame-indexed, so this is a hint "
+                         "for the mp4 encoder only.")
+    sm.add_argument("--demo-lock-bbox", action="store_true",
+                    help="Diagnostic (requires --demo-video): reuse frame 0's "
+                         "bbox_center and bbox_size for every frame when "
+                         "rebuilding the camera. If jitter largely disappears "
+                         "in the resulting mp4, bbox instability is the "
+                         "dominant source; if it remains, SMIRK encoder "
+                         "output is. Does NOT affect the `.frame` files "
+                         "written to checkpoint_raw/.")
+    sm.add_argument("--demo-smooth-bbox", type=int, default=0, metavar="N",
+                    help="Diagnostic (requires --demo-video): replace each "
+                         "frame's bbox with a centred moving average over a "
+                         "(2N+1)-frame window. A middle ground between "
+                         "no-op (N=0) and --demo-lock-bbox. Offline-only — "
+                         "this is a jitter-attribution tool, not the path "
+                         "used to generate training data.")
+    sm.add_argument("--demo-lbs-pose", action="store_true",
+                    help="Diagnostic (requires --demo-video): render the "
+                         "FLAME mesh with SMIRK's own demo convention — "
+                         "apply `pose_params` inside FLAME's LBS kinematic "
+                         "tree (rotation around the root joint) instead of "
+                         "externally as an `R @ verts` matmul around the "
+                         "canonical origin. This isolates the true "
+                         "per-frame SMIRK encoder jitter from the "
+                         "\"origin rotation\" amplification that "
+                         "FlashAvatar's default convention introduces at "
+                         "render time. Does NOT affect the `.frame` files.")
+    # --- temporal LPF ---
+    sm.add_argument("--lpf-cutoff", type=float, default=None, metavar="HZ",
+                    help="Enable a zero-phase FIR low-pass filter over the "
+                         "frame sequence for selected FLAME channels. "
+                         "Cutoff frequency in Hz (e.g. 2.0). Requires "
+                         "--lpf-fps. Intended for preparing Listening Head "
+                         "Generation teacher data: velocity / acceleration "
+                         "features amplify sub-pixel SMIRK jitter, so the "
+                         "raw per-frame output needs smoothing offline. "
+                         "Affects the `.frame` files AND the demo overlay.")
+    sm.add_argument("--lpf-fps", type=float, default=None, metavar="HZ",
+                    help="Source video fps used to normalize --lpf-cutoff "
+                         "against Nyquist. Required whenever --lpf-cutoff "
+                         "is given (the tracker itself is frame-indexed "
+                         "and doesn't otherwise know the fps).")
+    sm.add_argument("--lpf-window-sec", type=float, default=1.0,
+                    metavar="SEC",
+                    help="FIR filter window length in seconds "
+                         "(default 1.0). Filter taps = round(window_sec * "
+                         "lpf_fps), rounded up to the nearest odd integer "
+                         "for symmetry.")
+    sm.add_argument("--lpf-channels", type=str, default="cam,pose",
+                    metavar="LIST",
+                    help="Comma-separated FLAME channels to smooth "
+                         "(default: cam,pose). Available: cam, pose, exp, "
+                         "jaw, eyelids. `cam,pose` tackles the rendering-"
+                         "convention jitter; add `exp,jaw,eyelids` if the "
+                         "consumer (e.g. Listening Head Gen velocity "
+                         "features) also needs smooth expression tracks.")
 
     return p
 
@@ -362,9 +429,31 @@ def cmd_smirk(args: argparse.Namespace) -> int:
         overwrite=args.overwrite,
         eye_mode=args.eye_mode,
     )
+
+    lpf_cfg = None
+    if args.lpf_cutoff is not None:
+        if args.lpf_fps is None:
+            print("error: --lpf-cutoff requires --lpf-fps.", file=sys.stderr)
+            return 1
+        from preprocess.smirk_lpf import LpfConfig
+        channels = tuple(c.strip() for c in args.lpf_channels.split(",")
+                         if c.strip())
+        lpf_cfg = LpfConfig(
+            cutoff_hz=args.lpf_cutoff,
+            fps=args.lpf_fps,
+            window_sec=args.lpf_window_sec,
+            channels=channels,
+        )
+
     print(f"[smirk] {raw_imgs} -> {ckpt_raw}")
     n = smirk_mod.run(cfg, raw_imgs, ckpt_raw,
-                      verify_dir=args.verify_dir)
+                      verify_dir=args.verify_dir,
+                      demo_path=args.demo_video,
+                      demo_fps=args.demo_fps,
+                      demo_lock_bbox=args.demo_lock_bbox,
+                      demo_smooth_bbox=args.demo_smooth_bbox,
+                      demo_lbs_pose=args.demo_lbs_pose,
+                      lpf_cfg=lpf_cfg)
     print(f"[smirk] wrote {n} .frame files")
     print(f"[smirk] next: python scripts/preprocess.py finalize "
           f"--idname {args.idname}")

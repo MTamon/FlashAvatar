@@ -479,6 +479,189 @@ FlashAvatar 自身のトップレベル `src/` 名前空間をシャドーしな
 ~20 px を超えると警告が出て、通常は正射影→透視投影の深度推定に
 もっと大きな `--focal-px` が必要であることを意味します。
 
+## Demo オーバーレイ（`--demo-video`）
+
+`--verify-dir` は数枚だけのスポット確認ですが、**連続再生で jitter や
+アライメントを目視・時系列比較したい**場合は `--demo-video` を使います。
+
+```bash
+python scripts/preprocess.py smirk --idname <idname> \
+    --demo-video demo.mp4 --demo-fps 30
+```
+
+出力:
+
+- `demo.mp4` — 元フレームに以下をオーバーレイした mp4:
+  - **MediaPipe bbox**（水色＝検出成功、アンバー＝前フレーム再利用、
+    中心にクロスマーカー）
+  - **MediaPipe landmarks**（赤の点、468 点）
+  - **FLAME メッシュ再投影**（緑の点、stride=8 で ~630 頂点）
+  - 左上 HUD: `f=フレーム idx  det=検出フラグ  bbox=サイズ  Z=深度
+    pose=ext|lbs`
+- `demo_stats.csv` — 各フレームの `bbox_center, bbox_size, t_x/y/z` と
+  それらの前フレーム差分（`d_*`）、`speed_bbox_center`, `speed_t`
+  （L2 ノルム差）。jitter を時系列数値として可視化できます。
+
+### Jitter 要因の切り分けフラグ
+
+いずれも **demo 描画にのみ**適用され、`.frame` ファイルには影響しません。
+
+| フラグ | 用途 |
+|---|---|
+| `--demo-lock-bbox` | 先頭フレームの `bbox_center, bbox_size` を全フレームに固定。jitter が消えれば bbox 起因、残れば SMIRK encoder 起因。 |
+| `--demo-smooth-bbox N` | `(2N+1)` フレーム中心平均 bbox。lock-bbox と no-op の中間強度。offline 診断専用（causal 制約なし）。 |
+| `--demo-lbs-pose` | `pose_params` を FLAME LBS（root joint 中心回転）経由で適用。SMIRK 公式デモと同じ convention。FlashAvatar 既定の「外部 R で原点中心回転」と比較するための診断モード。 |
+| `--demo-fps HZ` | mp4 の再生 fps ヒント（既定 25）。SMIRK 処理はフレームインデックス駆動なのでエンコーダへの指示のみ。 |
+
+典型的な使用パターン（3 本並べて目視比較）:
+
+```bash
+# baseline（FlashAvatar 本体と同じ convention）
+python scripts/preprocess.py smirk --idname <idname> \
+    --demo-video demo_ext.mp4 --demo-fps 30
+
+# bbox 固定で bbox 起因 jitter を消したい
+python scripts/preprocess.py smirk --idname <idname> \
+    --demo-video demo_locked.mp4 --demo-fps 30 --demo-lock-bbox
+
+# LBS convention（SMIRK 公式と同じ、回転中心問題を切り分ける）
+python scripts/preprocess.py smirk --idname <idname> \
+    --demo-video demo_lbs.mp4 --demo-fps 30 --demo-lbs-pose
+```
+
+## 時間方向 LPF（`--lpf-cutoff`）
+
+Listening Head Generation の学習では 1 次・2 次差分（速度・加速度）
+特徴を使うため、**サブピクセル級の per-frame jitter が微分で爆発的に
+増幅**します。過去のプロジェクトでは教師データの速度・加速度が jitter
+支配で使い物にならなかった実績があり、教師データ作成段階で zero-phase
+FIR LPF を掛けるのが標準的な対策です。
+
+```bash
+python scripts/preprocess.py smirk --idname <idname> \
+    --lpf-cutoff 2.0 --lpf-fps 30 \
+    --demo-video demo_lpf.mp4 --demo-fps 30
+```
+
+### フラグ
+
+| フラグ | 既定 | 意味 |
+|---|---|---|
+| `--lpf-cutoff HZ` | なし | カットオフ周波数（Hz）。指定すると LPF が有効。 |
+| `--lpf-fps HZ` | なし | 映像 FPS。`cutoff / (fps/2)` で Nyquist 正規化するため、`--lpf-cutoff` と同時指定必須。 |
+| `--lpf-window-sec SEC` | 1.0 | フィルタ窓の秒数。タップ数 = `round(window_sec × fps)` を奇数に丸め。 |
+| `--lpf-channels LIST` | `cam,pose` | カンマ区切り。使用可能: `cam, pose, exp, jaw, eyelids`。 |
+
+### 設計指針
+
+- **Cutoff (`--lpf-cutoff`)**: 物理的に想定される最大動作周波数の 1〜2 倍。
+  - 頭部位置・向き (`cam, pose`): 2〜3 Hz で十分（人が意図的に振る頭の動きは ~2 Hz 以下）
+  - 発話中の顎 (`jaw`): 4〜6 Hz（音節速度を超えない範囲）
+  - 瞬き (`eyelids`): 6〜8 Hz（閉じる相が ~100 ms と速い）
+  - 表情 (`exp`): 3〜5 Hz が無難。強すぎるとマイクロ表情が消える
+- **Window (`--lpf-window-sec`)**: 遷移帯域幅の逆数に比例。通常は 1.0〜1.5 秒
+  - 窓が長い → 遷移帯が狭い（よく切れる）、ただし端っこが `filtfilt`
+    padding の影響を受けるフレーム数が増える
+  - 窓が短い → 端の影響は小さいが、通過帯/阻止帯の境目がぼやける
+  - 経験則: `window_sec × cutoff_hz ≈ 2〜4` が扱いやすい
+- **Channels (`--lpf-channels`)**:
+  - **安全な既定** (`cam,pose`): 頭部位置・向きだけ平滑化し、表情系は無加工
+  - **Listening Head Gen 用の推奨** (`cam,pose,exp,jaw,eyelids`): 全チャネル平滑化
+  - **shape は対象外**: `canonicalize_shape` で sequence 内唯一の値に
+    畳み込まれているため LPF 対象にならない
+
+### Zero-phase（filtfilt）
+
+実装は `scipy.signal.filtfilt` による前向き・後向き 2 回適用で、
+**位相遅延ゼロ**です。速度・加速度特徴のタイムスタンプが元映像と
+ずれないので、後段で音声・テキストとアラインするときに時刻補正が
+不要です。
+
+代償として、`filtfilt` はシーケンス冒頭と末尾の数十フレーム
+（＝窓長程度）で端効果があります。Listening Head Gen の学習では
+先頭・末尾を数秒捨てるのが一般的なので通常は気になりませんが、
+短いクリップでは注意してください（`filtfilt` の要求を満たさず
+エラーになる場合あり: 最小 `3 × filter_length` 超のフレーム数が必要）。
+
+### 注意点
+
+- **axis-angle を直接平滑化**しています。頭部・顎の典型動作範囲
+  （主枝 ±π 内）では安全ですが、大きな回転で branch cut を跨ぐと
+  不連続ポイントで乱れる可能性あり。そういうケースに当たったら
+  rotation matrix / quaternion 空間での平均化に拡張してください。
+- `--lpf-fps` は映像の実 FPS と一致させてください（`preprocess prepare`
+  で ffmpeg に設定したもの、または原動画の FPS）。間違えると
+  cutoff が意図と違う Hz になります。
+
+## 診断で判明した回転中心問題（次作業の引き継ぎ）
+
+上記 demo 機能群を使った jitter 診断で、**SMIRK 由来ではなく、
+FlashAvatar の FLAME メッシュ描画 convention 由来**の系統的 jitter
+源が判明しました。これは本セッションのスコープ外で、別タスクとして
+分離しています。概要を残します。
+
+### 症状
+
+- 頭部が正面向きのときはメッシュが顔によく重なる
+- 頭部を左右に振ると、メッシュが**奥側にある**ようにズレ（z 軸方向
+  の系統的オフセット）
+- 瞬き・顎の開閉の瞬間、**耳・頭頂部付近で特に顕著な位置変動**が
+  発生（メッシュ全体が小さく揺れる）
+
+### 原因
+
+FLAME の `pose_params` は本来、**root joint を中心とした回転**
+として LBS 内部で適用される。しかし我々のパイプラインは:
+
+- `preprocess/smirk_convert.py::_build_R` — `pose` を外部 R 行列に
+  畳み込み: `R = GL_TO_CV @ axis_angle_to_matrix(pose)`
+- `src/deform_model.py:120-126` — `forward_geo(rot_params=None)` で
+  canonical メッシュを得、外部 R に pose を依存
+
+の形になっていて、**原点中心の回転**として pose を適用している。
+真の root joint と canonical 原点にオフセット `J_root` があるため、
+pose 誤差 δθ に対し `δθ × J_root` ぶんの余分な並進が生じ、それが
+見かけの z 軸オフセットや瞬き連動の揺れとして可視化される。
+
+`--demo-lbs-pose` で LBS 経由に切り替えると、上記症状が両方とも
+消えることを確認済み。したがって原因は FlashAvatar 本体の
+レンダリング convention にあり、SMIRK エンコーダ自体の問題では
+ない。
+
+### 必要な変更（atomic に実施）
+
+1. **`preprocess/smirk_convert.py::to_flashavatar_frame`**
+   - `flame_dict` に `pose`（`pose_params` を rot6d に変換）を追加
+   - `_build_R` を `GL_TO_CV` のみ返す形に変更（pose を畳み込まない）
+2. **`src/deform_model.py::decode`**
+   - `flame_model.forward_geo(..., rot_params=codedict['pose'])` を
+     渡すよう追加
+3. **`scene/__init__.py`**
+   - `flame_params` から `pose` を読み出し、`codedict` に含めて
+     `deform_model` に渡す
+4. **`preprocess/smirk_demo.py`, `preprocess/smirk_verify.py`**
+   - デフォルトを LBS convention に変更、または `--demo-lbs-pose` を
+     デフォルト ON にする
+
+### 互換性
+
+既存の `.frame` ファイルは `flame_dict` に `pose` を持たないため、
+この変更は **既存学習済みモデル・既存 `.frame` 出力との後方互換性を
+破壊**します。推奨移行戦略は「全 `.frame` を再生成 + FlashAvatar
+再学習」。convention 混在を避けるため。
+
+### 残りうる純 encoder 起因の揺れ
+
+`--demo-lbs-pose` + `--demo-lock-bbox` の組み合わせでも観測される
+以下は SMIRK encoder 自体の性質で、幾何学修正では解消しません:
+
+- 口の開閉時に bbox 縦幅が変動 → `s, cam` がわずかに揺れる
+- メッシュがわずかに膨張/収縮して見える
+
+この残留揺れに対しては、上記 LPF（`--lpf-cutoff`）か、または
+SMIRK 側での「顎・口の動きに不感な bbox 定義」の導入で対処することが
+想定されます（後者は SMIRK 本体の改修が必要）。
+
 ## 既存のインストール／パイプラインとの関係
 
 - `install_128.sh` → 変更なし。FlashAvatar 自身の環境には手を入れません。
