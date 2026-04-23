@@ -30,3 +30,5 @@ example.zip
 *.zip
 *.pth
 *.pt
+
+!run_pipeline.sh
